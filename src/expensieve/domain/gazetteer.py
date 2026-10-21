@@ -147,3 +147,72 @@ class Gazetteer:
                 best_dist = dist
                 best_name = place.name
         return best_name
+
+    def normalize_address(self, raw_address: str) -> str:
+        """Normalize a raw street address from an invoice PDF or email into a clean landmark/locality."""
+        cleaned = " ".join(raw_address.split()).strip(" ,.-")
+        if not cleaned:
+            return "Unknown"
+        upper = cleaned.upper()
+
+        # Personal home & frequent landmarks
+        if "RAGHAVENDRA NAGAR" in upper and ("HORAMAVU" in upper or "KALKERE" in upper):
+            return "Bangalore Home"
+        if "BENNIGANAHALLI" in upper:
+            return "Benniganahalli Metro"
+        if "BANGALORE INTERNATIONAL CENTRE" in upper:
+            return "Bangalore International Centre (Domlur)"
+        if "JAWAHARLAL NEHRU PLANETARIUM" in upper:
+            return "Jawaharlal Nehru Planetarium"
+        if "PRESTIGE SHANTINIKETAN" in upper:
+            return "Prestige Shantiniketan (Whitefield)"
+        if "OCEANUS FREESIA" in upper:
+            return "Oceanus Freesia Enclave (Bellandur)"
+        if "PHOENIX MALL OF ASIA" in upper or "MALL OF ASIA" in upper:
+            return "Phoenix Mall of Asia (Yelahanka)"
+        if "PARK VIEW LAYOUT" in upper:
+            return "Park View Layout (Sahakara Nagar)"
+        if "KEMPEGOWDA INTERNATIONAL AIRPORT" in upper or "INTERNATIONAL AIRPORT" in upper:
+            if "TERMINAL 2" in upper:
+                return "Kempegowda International Airport Terminal 2"
+            return "Kempegowda International Airport"
+        if "SCIENCE GALLERY" in upper:
+            return "Science Gallery Bengaluru"
+        if "VR BENGALURU" in upper:
+            return "VR Bengaluru Mall"
+        if "TELEPHONE HOUSE" in upper:
+            return "Telephone House (Raj Bhavan Rd)"
+        if "COOKE TOWN" in upper:
+            return "Cooke Town"
+        if "PAI LAYOUT" in upper or "DOORAVANI NAGAR" in upper or "TIN FACTORY" in upper:
+            if "PAI LAYOUT" in upper:
+                return "Pai Layout (Tin Factory)"
+            return "Tin Factory"
+        if "RAMAMURTHY NAGAR" in upper:
+            return "Ramamurthy Nagar"
+        if "DOMLUR" in upper:
+            return "Domlur"
+        if "INDIRANAGAR" in upper or "HAL 2ND STAGE" in upper:
+            return "Indiranagar (HAL 2nd Stage)"
+        if "MATHIKERE" in upper:
+            return "Mathikere"
+        if "BTM LAYOUT" in upper:
+            return "BTM Layout"
+        if "SAHAKARA NAGAR" in upper:
+            return "Sahakara Nagar"
+        if "GANGANAGAR" in upper:
+            return "Ganganagar"
+
+        # Generic fallback: strip trailing city/state/country/pincode and take last 1-2 meaningful segments
+        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+        filtered = [
+            p
+            for p in parts
+            if not any(
+                skip in p.upper()
+                for skip in ("KARNATAKA", "INDIA", "BENGALURU", "BANGALORE", "560")
+            )
+        ]
+        if filtered:
+            return filtered[-1]
+        return parts[0] if parts else cleaned

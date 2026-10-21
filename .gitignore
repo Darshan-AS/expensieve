@@ -18,3 +18,5 @@ Timeline.json
 .expensieve_state.json
 .expensieve_cache/
 staged_*.json
+.vscode/
+.DS_Store

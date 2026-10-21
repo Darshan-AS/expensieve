@@ -1,0 +1,316 @@
+"""Unit tests for Gmail/PDF receipt extractors and merchant web order matchers."""
+
+import unittest
+from datetime import UTC, datetime
+
+from expensieve.adapters.collectors.chrome_cdp import (
+    CachedMerchantOrderCollector,
+    classify_zomato_category,
+    format_zomato_dishes,
+    parse_zepto_order_detail_text,
+)
+from expensieve.adapters.collectors.gmail_imap import (
+    AmazonEmailExtractor,
+    EmailMessagePayload,
+    InvestmentEmailExtractor,
+    NammaYatriPdfExtractor,
+    RapidoReceiptExtractor,
+    SwiggyReceiptExtractor,
+    TravelBookingExtractor,
+)
+from expensieve.domain.models import StatementRow, TransactionKind
+
+
+def _make_row(
+    row_index: int,
+    date_iso: str,
+    narration: str,
+    debit_minor: int = 0,
+    credit_minor: int = 0,
+    ref: str = "0000600000000001",
+) -> StatementRow:
+    return StatementRow(
+        row_index=row_index,
+        date_iso=date_iso,
+        value_date_iso=date_iso,
+        narration=narration,
+        reference_no=ref,
+        debit_minor=debit_minor,
+        credit_minor=credit_minor,
+        closing_balance_minor=1000000,
+    )
+
+
+class TestGmailReceiptExtractors(unittest.TestCase):
+    def test_swiggy_extractor_with_items_and_restaurant(self) -> None:
+        extractor = SwiggyReceiptExtractor()
+        row = _make_row(
+            row_index=10,
+            date_iso="2026-09-27",
+            narration="UPI-SWIGGY-SWIGGY8.RZP@AXIS-627012345678-PAID VIA CRED",
+            debit_minor=18800,
+        )
+        msg = EmailMessagePayload(
+            uid="1",
+            sent_utc=datetime(2026, 9, 27, 9, 59, tzinfo=UTC),
+            date_iso="2026-09-27",
+            sender="Swiggy <noreply@swiggy.in>",
+            subject="Your Swiggy order was delivered before time",
+            text_body=(
+                "Delivery in 40 mins! ORDER JOURNEY Auntie Fung's NO 53 SUBBAYANAPALYA 60 FEET ROAD "
+                "Sep 27, 2:48 PM Order ID: 249470335153607 BILL DETAILS Teriyaki Ramen Veg x1 ₹289 "
+                "Restaurant Packaging ₹10 Paid Via Cred ₹188 Disclaimer"
+            ),
+            attachments=(),
+        )
+        evs = extractor.extract([msg], [row])
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].row_index, 10)
+        self.assertEqual(evs[0].category, "Meals & Fast Food")
+        self.assertEqual(evs[0].payee, "Swiggy")
+        self.assertEqual(evs[0].note, "1x Teriyaki Ramen Veg (Auntie Fung's)")
+        self.assertFalse(evs[0].needs_review)
+
+    def test_namma_yatri_line_parser_and_gazetteer(self) -> None:
+        sample_lines = [
+            "Hey Darshan A S, here's your invoice",
+            "2 rides taken on Oct 11 - Oct 19, 2026",
+            "Total Fare",
+            "₹435.00",
+            "19 Oct, 2026",
+            "Ride Fare: ₹94",
+            "9:18 PM",
+            "2345, Kodandarama Reddy Layout, Ramamurthy Nagar, Bengaluru, Karnataka",
+            "9:27 PM",
+            "7th Cross Rd, Horamavu, Raghavendra Nagar, Bengaluru, Karnataka",
+            "DRIVER NAME",
+            "O*K*S*AN",
+            "11 Oct, 2026",
+            "Ride Fare: ₹341",
+            "11:39 AM",
+            "7th Cross Rd, Horamavu, Raghavendra Nagar, Bengaluru, Karnataka",
+            "12:31 PM",
+            "Jawaharlal Nehru Planetarium, Sankey Road, High Grounds, Bengaluru, Karnataka",
+            "DRIVER NAME",
+            "MOHAMMED KHADER",
+        ]
+        rides = NammaYatriPdfExtractor._parse_rides_from_lines(sample_lines)
+        self.assertEqual(len(rides), 2)
+        self.assertEqual(rides[0][0], "2026-10-19")
+        self.assertEqual(rides[0][1], 9400)
+        self.assertEqual(rides[1][0], "2026-10-11")
+        self.assertEqual(rides[1][1], 34100)
+
+    def test_rapido_receipt_extractor_html_and_lines(self) -> None:
+        extractor = RapidoReceiptExtractor()
+        row = _make_row(
+            row_index=25,
+            date_iso="2026-06-15",
+            narration="UPI-SANTHOSH KUMAR N-Q123@YBL-616612345678-RAPIDO",
+            debit_minor=15500,
+        )
+        msg = EmailMessagePayload(
+            uid="2",
+            sent_utc=datetime(2026, 6, 22, 6, 37, tzinfo=UTC),
+            date_iso="2026-06-22",
+            sender="Rapido <shoutout@rapido.bike>",
+            subject="Your trip with Rapido",
+            text_body=(
+                "Booking History Customer Name Darshan A S Ride ID RD17814949592469166 "
+                "Driver name Santhosh Kumar N Vehicle Number KA03AP0395 Mode of Vehicle Auto "
+                "Time of Ride Jun 15th 2026, 9:20 AM Selected Price ₹ 155 "
+                "Geetha Murali Illam, 25, 5th Cross Rd, Raghavendra Nagar, Horamavu, Bengaluru, Karnataka 560016, India "
+                "22/2, Krishna Reddy Industrial Estate, Dooravani Nagar, Bengaluru, Karnataka 560016, India "
+                "This document is issued on request by the passenger."
+            ),
+            attachments=(),
+        )
+        evs = extractor.extract([msg], [row])
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].row_index, 25)
+        self.assertEqual(evs[0].category, "Auto")
+        self.assertEqual(evs[0].payee, "Rapido")
+        self.assertEqual(evs[0].note, "Bangalore Home to Tin Factory")
+
+    def test_amazon_email_extractor_combined_and_pharmacy(self) -> None:
+        extractor = AmazonEmailExtractor()
+        row_meds = _make_row(
+            row_index=629,
+            date_iso="2026-09-06",
+            narration="UPI-AMAZON INDIA-AMAZON@APL-624912345678-AMAZON",
+            debit_minor=201252,
+        )
+        row_multi = _make_row(
+            row_index=295,
+            date_iso="2026-05-16",
+            narration="UPI-AMAZON INDIA-AMAZON@APL-613612345678-AMAZON",
+            debit_minor=90700,
+        )
+        msg_meds = EmailMessagePayload(
+            uid="3",
+            sent_utc=datetime(2026, 9, 6, 16, 19, tzinfo=UTC),
+            date_iso="2026-09-06",
+            sender="auto-confirm@amazon.in",
+            subject="Ordered: Eptus 50",
+            text_body=(
+                "Order #\n171-3271967-0616305\n"
+                "* Eptus 50 - Strip of 10 Tablets\n  Quantity: 1\n  586.95 INR\n"
+                "* Dolo-650 - Strip of 15 Tablets\n  Quantity: 1\n  31.15 INR\n"
+                "Total\n2012.52 INR\n"
+            ),
+            attachments=(),
+        )
+        msg_multi = EmailMessagePayload(
+            uid="4",
+            sent_utc=datetime(2026, 5, 16, 5, 40, tzinfo=UTC),
+            date_iso="2026-05-16",
+            sender="auto-confirm@amazon.in",
+            subject="Ordered: Mirabelle Fairness Face...",
+            text_body=(
+                "Order #\n171-7664625-0901150\n"
+                "* Mirabelle Fairness Face Mask Sheets | Korean Sheet Mask\n  Quantity: 1\n  327 INR\n"
+                "Total\n599.3 INR\n"
+                "Order #\n171-6011219-2521949\n"
+                "* Lakme Forever Matte Compact Powder\n  Quantity: 1\n  143 INR\n"
+                "Total\n307.7 INR\n"
+            ),
+            attachments=(),
+        )
+        evs = extractor.extract([msg_meds, msg_multi], [row_meds, row_multi])
+        self.assertEqual(len(evs), 2)
+        by_row = {e.row_index: e for e in evs}
+        self.assertEqual(by_row[629].category, "Drug-store, chemist")
+        self.assertIn("1x Eptus 50", by_row[629].note or "")
+        self.assertEqual(by_row[295].category, "Wellness, beauty")
+        self.assertIn("1x Mirabelle Fairness Face Mask Sheets", by_row[295].note or "")
+        self.assertIn("1x Lakme Forever Matte Compact Powder", by_row[295].note or "")
+
+    def test_travel_and_investment_extractors(self) -> None:
+        travel_ext = TravelBookingExtractor()
+        row_train = _make_row(
+            row_index=272,
+            date_iso="2026-04-28",
+            narration="UPI-CONFIRMTKT-CONFIRMTKT@HDFCBANK-611812345678-TRAIN",
+            debit_minor=15800,
+        )
+        msg_train = EmailMessagePayload(
+            uid="5",
+            sent_utc=datetime(2026, 4, 28, 12, 23, tzinfo=UTC),
+            date_iso="2026-04-28",
+            sender="ConfirmTkt Support <support@confirmtkt.com>",
+            subject="Train Ticket -TK952601855A48",
+            text_body=(
+                "Your IRCTC e-ticket between (SBC) and (ASK) on 30 Apr 2026 has been booked.\n"
+                "PNR No.\nConfirmtkt Booking ID\n4857255872\nTK952601855A48\n"
+                "Train Name & No.\nClass/Quota\nJANSHATABDI EXP/12089\n2S/GN\n"
+                "Total Fare\n₹ 158.0\n"
+            ),
+            attachments=(),
+        )
+        t_evs = travel_ext.extract([msg_train], [row_train])
+        self.assertEqual(len(t_evs), 1)
+        self.assertEqual(t_evs[0].category, "Train")
+        self.assertEqual(t_evs[0].payee, "ConfirmTkt")
+        self.assertIn("Bangalore (SBC) to Arsikere (ASK)", t_evs[0].note or "")
+        self.assertIn("PNR 4857255872", t_evs[0].note or "")
+
+        inv_ext = InvestmentEmailExtractor()
+        row_ipo = _make_row(
+            row_index=461,
+            date_iso="2026-07-18",
+            narration="UPI-SBI FUNDS MANAGEMENT-IPO@KFIN-619912345678-IPO",
+            debit_minor=1492400,
+        )
+        msg_ipo = EmailMessagePayload(
+            uid="6",
+            sent_utc=datetime(2026, 7, 18, 11, 1, tzinfo=UTC),
+            date_iso="2026-07-18",
+            sender="KFIN TECHNOLOGIES LIMITED <sbifml.ipo@kfintech.com>",
+            subject="SBI FUNDS MANAGMENT LIMITED-IPO",
+            text_body=(
+                "Bid cum Application Form No.\n68857622\n"
+                "Issue Price per Security (Rs.)\n574\n"
+                "Shares Allotted\n26 Shares being credited\n"
+                "Amount adjusted towards allotment (Rs.)\n14924.00\n"
+            ),
+            attachments=(),
+        )
+        i_evs = inv_ext.extract([msg_ipo], [row_ipo])
+        self.assertEqual(len(i_evs), 1)
+        self.assertEqual(i_evs[0].kind, TransactionKind.TRANSFER)
+        self.assertEqual(i_evs[0].transfer_account, "Investments")
+        self.assertEqual(i_evs[0].payee, "IndMoney")
+        self.assertIn("26 shares @ ₹574, Appl 68857622", i_evs[0].note or "")
+
+
+class TestMerchantOrderCollectors(unittest.TestCase):
+    def test_zomato_dish_formatting_and_matching(self) -> None:
+        self.assertEqual(
+            format_zomato_dishes("1 x Paper Masala Dosa, 2 x Filter Coffee"),
+            "1x Paper Masala Dosa\n2x Filter Coffee",
+        )
+        self.assertEqual(
+            classify_zomato_category("1x Belgian Chocolate Ice Cream", "Polar Bear"),
+            "Desserts & Sweets",
+        )
+        self.assertEqual(
+            classify_zomato_category("1x Masala Dosa", "Udupi Mane Thindi"),
+            "Meals & Fast Food",
+        )
+
+        collector = CachedMerchantOrderCollector()
+        rows = [
+            _make_row(1, "2026-10-21", "UPI-ZOMATO-629412345678-ZOMATO", debit_minor=9209),
+            _make_row(2, "2026-02-02", "UPI-ZOMATO-603312345678-MANDATE", debit_minor=100),
+        ]
+        orders = [
+            {
+                "orderId": 8745016695,
+                "totalCost": "₹92.09",
+                "orderDate": "October 21, 2026 at 09:14 AM",
+                "dishString": "1 x Paper Masala Dosa",
+                "status": 6,
+                "paymentStatus": 1,
+                "resName": "Udupi Mane Thindi",
+            }
+        ]
+        evs = collector.match_zomato_orders(rows, orders)
+        self.assertEqual(len(evs), 2)
+        self.assertEqual(evs[0].note, "1x Paper Masala Dosa (Udupi Mane Thindi)")
+        self.assertEqual(evs[1].note, "Zomato UPI mandate verification")
+
+    def test_zepto_and_blinkit_matching(self) -> None:
+        raw_zepto_page = (
+            "Order #JMSJKBLEK85668\n2 items\nDelivered\n2 items in order\n\n"
+            "Niftas 100mg Tablet SR\n\n14 Tablets\n\n1 unit\n\n₹110\n\n₹122.01\n\n"
+            "Otrivin Oxy Fast Relief Adult Nasal Spray\n\n10 mL\n\n1 unit\n\n₹120\n\n₹132.86\n\n"
+            "Rate Order\nOrder Again"
+        )
+        note, cat = parse_zepto_order_detail_text(raw_zepto_page)
+        self.assertEqual(cat, "Drug-store, chemist")
+        self.assertEqual(
+            note,
+            "1x Niftas 100mg Tablet SR\n1x Otrivin Oxy Fast Relief Adult Nasal Spray",
+        )
+
+        collector = CachedMerchantOrderCollector()
+        b_row = _make_row(50, "2026-01-24", "UPI-BLINKIT-602412345678-BLINKIT", debit_minor=28000)
+        b_orders = [
+            {
+                "dateStr": "24 Jan, 10:15 am",
+                "amount": "₹180",
+                "items": [{"name": "Nandini Curd", "quantity": 2}],
+            },
+            {
+                "dateStr": "24 Jan, 10:15 am",
+                "amount": "₹100",
+                "items": [{"name": "Whole Wheat Bread", "quantity": 1}],
+            },
+        ]
+        b_evs = collector.match_blinkit_orders([b_row], b_orders, default_year=2026)
+        self.assertEqual(len(b_evs), 1)
+        self.assertEqual(b_evs[0].note, "2x Nandini Curd\n1x Whole Wheat Bread")
+
+
+if __name__ == "__main__":
+    unittest.main()

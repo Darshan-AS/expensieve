@@ -10,6 +10,8 @@ from rich.console import Console
 from rich.table import Table
 
 from expensieve.adapters.collectors.adb_sms import AdbSmsCollector
+from expensieve.adapters.collectors.chrome_cdp import CachedMerchantOrderCollector
+from expensieve.adapters.collectors.gmail_imap import GmailImapCollector
 from expensieve.adapters.collectors.timeline_geo import TimelineGeoCollector
 from expensieve.adapters.geocoding.nominatim_cache import CachedNominatimGeocoder
 from expensieve.adapters.sinks.sourdough_sink import SourdoughLedgerSink
@@ -49,6 +51,42 @@ def sync_command(
     timeline: Annotated[
         Path | None,
         typer.Option("--timeline", "-t", help="Optional path to Google Maps Timeline.json file."),
+    ] = None,
+    zomato_json: Annotated[
+        Path | None,
+        typer.Option("--zomato-json", help="Optional path to cached Zomato orders JSON file."),
+    ] = None,
+    zepto_json: Annotated[
+        Path | None,
+        typer.Option("--zepto-json", help="Optional path to cached Zepto orders JSON file."),
+    ] = None,
+    blinkit_json: Annotated[
+        Path | None,
+        typer.Option("--blinkit-json", help="Optional path to cached Blinkit orders JSON file."),
+    ] = None,
+    amazon_json: Annotated[
+        Path | None,
+        typer.Option("--amazon-json", help="Optional path to cached Amazon orders JSON file."),
+    ] = None,
+    uber_json: Annotated[
+        Path | None,
+        typer.Option("--uber-json", help="Optional path to cached Uber trips JSON file."),
+    ] = None,
+    live_chrome: Annotated[
+        bool,
+        typer.Option("--live-chrome", help="Fetch live order history from open Google Chrome tabs."),
+    ] = False,
+    gmail_user: Annotated[
+        str | None,
+        typer.Option("--gmail-user", envvar="EXPENSIEVE_GMAIL_USER", help="Gmail address for IMAP receipt extraction."),
+    ] = None,
+    gmail_app_password: Annotated[
+        str | None,
+        typer.Option(
+            "--gmail-app-password",
+            envvar="EXPENSIEVE_GMAIL_APP_PASSWORD",
+            help="Gmail App Password for IMAP receipt extraction.",
+        ),
     ] = None,
     output_json: Annotated[
         Path | None,
@@ -94,6 +132,26 @@ def sync_command(
                 gazetteer=Gazetteer(),
                 geocoder=geocoder,
                 row_timestamps_utc=row_ts_map,
+            )
+        )
+
+    if any((zomato_json, zepto_json, blinkit_json, amazon_json, uber_json, live_chrome)):
+        collectors.append(
+            CachedMerchantOrderCollector(
+                zomato_json_path=zomato_json,
+                zepto_json_path=zepto_json,
+                blinkit_json_path=blinkit_json,
+                amazon_json_path=amazon_json,
+                uber_json_path=uber_json,
+                enable_live_chrome=live_chrome,
+            )
+        )
+
+    if gmail_user and gmail_app_password:
+        collectors.append(
+            GmailImapCollector(
+                email_address=gmail_user,
+                app_password=gmail_app_password,
             )
         )
 
