@@ -1,0 +1,59 @@
+name: Reconcile — Manual Statement Enrichment & Staged JSON Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      statement_path:
+        description: "Path to HDFC delimited statement file (.txt / .csv) in workspace"
+        required: true
+        default: "tests/fixtures/sample_statement.txt"
+      cutoff_ref:
+        description: "Optional 12-digit UPI RRN cutoff reference"
+        required: false
+        default: ""
+      account_name:
+        description: "Target ledger account name"
+        required: false
+        default: "Savings"
+
+permissions:
+  contents: read
+
+jobs:
+  stage-enrichment:
+    name: Enrich Statement & Export Canonical Transactions JSON
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.14
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: Sync dependencies
+        run: uv sync --all-groups --default-index https://pypi.org/simple
+
+      - name: Run ExpenSieve enrichment pipeline (dry-run staged export)
+        env:
+          EXPENSIEVE_GMAIL_USER: ${{ secrets.EXPENSIEVE_GMAIL_USER }}
+          EXPENSIEVE_GMAIL_APP_PASSWORD: ${{ secrets.EXPENSIEVE_GMAIL_APP_PASSWORD }}
+        run: |
+          CUTOFF_ARG=""
+          if [ -n "${{ inputs.cutoff_ref }}" ]; then
+            CUTOFF_ARG="--cutoff-ref ${{ inputs.cutoff_ref }}"
+          fi
+          ./sieve sync \
+            --statement "${{ inputs.statement_path }}" \
+            --account "${{ inputs.account_name }}" \
+            $CUTOFF_ARG \
+            --output dist/staged_transactions.json
+
+      - name: Upload staged CanonicalTransactions JSON artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: expensieve-staged-transactions
+          path: dist/staged_transactions.json
+          retention-days: 7

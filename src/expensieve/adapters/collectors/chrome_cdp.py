@@ -162,7 +162,7 @@ def execute_chrome_tab_js(url_substring: str, js_code: str, timeout_sec: float =
             check=True,
             timeout=timeout_sec,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     out = res.stdout.strip()
     if not out or out == "TAB_NOT_FOUND":

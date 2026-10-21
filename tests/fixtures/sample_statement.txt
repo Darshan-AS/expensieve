@@ -1,0 +1,4 @@
+  Date     ,Narration                                                                                                                ,Value Dat,Debit Amount       ,Credit Amount      ,Chq/Ref Number   ,Closing Balance
+  05/03/26 ,UPI-BANGALORE METRO RAIL-BMRCLTD@INDIANBK-IDIB000B008-606412345678-UPI                                                   ,05/03/26 ,        57.00      ,         0.00      ,0000606412345678 ,       10943.00
+  05/03/26 ,UPI-ZOMATO LIMITED-ZOMATO@HDFCBANK-HDFC0000240-606487654321-Lunch order                                                  ,05/03/26 ,       343.00      ,         0.00      ,0000606487654321 ,       10600.00
+  06/03/26 ,UPI-NAMMA YATRI-NAMMAYATRI@YESBANK-YESB0000001-606511223344-Auto ride                                                    ,06/03/26 ,       150.00      ,         0.00      ,0000606511223344 ,       10450.00

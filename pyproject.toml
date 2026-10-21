@@ -10,16 +10,12 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "rich>=13.9.0",
-    "sourdough",
     "typer>=0.15.0",
 ]
 
 [project.scripts]
 sieve = "expensieve.cli.app:main"
 expensieve = "expensieve.cli.app:main"
-
-[tool.uv.sources]
-sourdough = { path = "../sourdough", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/expensieve"]
@@ -39,3 +35,7 @@ target-version = "py314"
 python_version = "3.14"
 strict = true
 packages = ["expensieve"]
+
+[[tool.mypy.overrides]]
+module = ["sourdough", "sourdough.*"]
+ignore_missing_imports = true

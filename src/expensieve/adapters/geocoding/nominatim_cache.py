@@ -26,7 +26,7 @@ class CachedNominatimGeocoder:
                 data = json.loads(self._cache_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     return {str(k): str(v) for k, v in data.items()}
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 pass
         return {}
 
@@ -59,6 +59,6 @@ class CachedNominatimGeocoder:
                     self._save_cache()
                     time.sleep(1.0)
                     return short_name
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return None
         return None

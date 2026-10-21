@@ -1,0 +1,408 @@
+specification {
+  element actor {
+    style {
+      shape person
+      color amber
+    }
+  }
+
+  element externalSystem {
+    style {
+      shape rectangle
+      color slate
+    }
+  }
+
+  element device {
+    style {
+      shape mobile
+      color sky
+    }
+  }
+
+  element system {
+    style {
+      shape rectangle
+      color indigo
+    }
+  }
+
+  element layer {
+    style {
+      shape rectangle
+      color indigo
+    }
+  }
+
+  element component {
+    style {
+      shape component
+      color blue
+    }
+  }
+
+  element extractor {
+    style {
+      shape component
+      color teal
+    }
+  }
+
+  element domainModel {
+    style {
+      shape cylinder
+      color green
+    }
+  }
+
+  element storage {
+    style {
+      shape storage
+      color amber
+    }
+  }
+
+  relationship uses
+  relationship parses
+  relationship emits
+  relationship merges
+  relationship queries
+  relationship writes
+
+  tag spine
+  tag adapter
+  tag domain
+  tag sink
+  tag external
+}
+
+model {
+  user = actor 'User (Darshan)' {
+    description 'Downloads periodic bank statements, runs ./sieve sync, and reviews low-confidence transactions'
+  }
+
+  // External Sources & Devices
+  hdfcBank = externalSystem 'HDFC Bank NetBanking' {
+    #external
+    technology 'Delimited Statement (.txt / .csv)'
+    description 'Exports periodic comma-delimited bank statements acting as the accounting spine'
+  }
+
+  pixelPhone = device 'Google Pixel (Android ADB)' {
+    #external
+    technology 'ADB USB / Wireless Debugging'
+    description 'Provides real-time bank/UPI SMS alerts (content://sms/inbox) and on-device Google Maps Timeline.json'
+  }
+
+  gmailImap = externalSystem 'Gmail (IMAP SSL)' {
+    #external
+    technology 'IMAPS (imap.gmail.com:993)'
+    description 'Stores PDF ride invoices, food delivery receipts, Amazon confirmations, train/hotel vouchers, and FD/IPO advices'
+  }
+
+  chromeBrowser = externalSystem 'Google Chrome (macOS AppleScript / CDP)' {
+    #external
+    technology 'AppleScript JS / Session Cache'
+    description 'Authenticated browser sessions for Zomato, Zepto, Blinkit, Amazon, and Uber order history'
+  }
+
+  nominatimApi = externalSystem 'OpenStreetMap Nominatim' {
+    #external
+    technology 'HTTPS REST GeoJSON'
+    description 'Reverse geocodes fallback WGS-84 coordinates into human-readable street and suburb names'
+  }
+
+  // Ledger Sinks
+  sourdoughSdk = externalSystem 'Sourdough SDK & CLI' {
+    #sink
+    technology 'Python 3.14 (./dough)'
+    description 'Python SDK & CLI for Wallet by BudgetBakers with append-only rollback journaling'
+  }
+
+  walletCouchDb = storage 'Wallet by BudgetBakers (CouchDB)' {
+    #sink
+    technology 'Cloudant / CouchDB (_bulk_docs)'
+    description 'Cloud-synced personal finance ledger storing RecordDocument (-Record_), Debt (-Debt_), and HashTag (-HashTag_) documents'
+  }
+
+  // Core System: ExpenSieve
+  expensieve = system 'ExpenSieve (./sieve)' {
+    technology 'Python 3.14 • uv • Hexagonal Architecture'
+    description 'App-agnostic personal expense enrichment engine and multi-source reconciliation pipeline'
+
+    cliLayer = layer 'CLI & Presentation Layer (expensieve.cli)' {
+      sieveCli = component 'Typer CLI App (./sieve)' {
+        technology 'Typer • Rich'
+        description 'Provides ./sieve sync and ./sieve snap commands, Rich summary tables, and staged JSON export'
+      }
+    }
+
+    serviceLayer = layer 'Orchestration & Services Layer (expensieve.services)' {
+      syncPipeline = component 'SyncPipeline' {
+        technology 'Pipeline Orchestrator'
+        description 'Coordinates statement parsing, multi-source evidence collection, deterministic merging, mathematical balance verification, and sink pushing'
+      }
+
+      evidenceMerger = component 'EvidenceMerger' {
+        technology 'Priority Resolver (10..100)'
+        description 'Resolves competing EnrichmentEvidence per StatementRow using deterministic EvidencePriority and confidence thresholds'
+      }
+    }
+
+    domainLayer = layer 'Pure Domain Core (expensieve.domain)' {
+      #domain
+      models = domainModel 'Canonical Domain Models' {
+        technology 'Frozen Dataclasses • Minor Units (Paise)'
+        description 'StatementRow, EnrichmentEvidence, CanonicalTransaction, DebtLinkGroup, EvidencePriority, and GeoPoint (Zero I/O)'
+      }
+
+      gazetteer = component 'Namma Metro & Landmark Gazetteer' {
+        technology 'Haversine Geodesic Snapping'
+        description '55+ Purple/Green Line Namma Metro stations, personal landmarks, coordinate snapping, and invoice address normalization'
+      }
+
+      declarativeRules = component 'DeclarativeRuleCollector' {
+        technology 'Regex & VPA Classifier'
+        description 'Classifies UPI remarks, food/snack/beverage keywords, investment transfers, family medical rows, and merchant VPAs'
+      }
+    }
+
+    portsLayer = layer 'Hexagonal Ports (expensieve.ports)' {
+      protocols = component 'Structural Protocols (PEP 544)' {
+        technology 'typing.Protocol'
+        description 'StatementSource, EvidenceCollector, ReverseGeocoder, and LedgerSink interfaces'
+      }
+    }
+
+    statementAdapters = layer 'Statement Source Adapters (expensieve.adapters.statements)' {
+      #adapter
+      #spine
+      hdfcSource = component 'HdfcDelimitedStatementSource' {
+        technology 'CSV State Machine • UPI Parser'
+        description 'Parses multiline HDFC delimited exports, decomposes UPI narrations (Payee, VPA, 12-digit RRN, Remark), and slices after cutoff_ref'
+      }
+    }
+
+    collectorAdapters = layer 'Evidence Collector Adapters (expensieve.adapters.collectors)' {
+      #adapter
+      adbSmsCollector = component 'AdbSmsCollector' {
+        technology 'Priority 40 (EXACT_TIMESTAMP_SMS)'
+        description 'Queries Pixel SMS inbox over ADB and matches 12-digit UPI RRNs to recover exact second-level UTC transaction timestamps'
+      }
+
+      timelineGeoCollector = component 'TimelineGeoCollector' {
+        technology 'Priority 75 (TIMELINE_GEO)'
+        description 'Matches SMS UTC timestamps against Google Maps Timeline.json IN_SUBWAY, activity segments, and place visits'
+      }
+
+      merchantWebCollector = component 'CachedMerchantOrderCollector' {
+        technology 'Priority 85 (MERCHANT_WEB_SCRAPE)'
+        description 'Extracts and matches itemized orders from Zomato, Zepto, Blinkit, Amazon, and Uber via Chrome AppleScript or JSON cache'
+      }
+
+      gmailImapCollector = component 'GmailImapCollector' {
+        technology 'Priority 95 (EMAIL_PDF_INVOICE)'
+        description 'Connects to imap.gmail.com and dispatches decoded MIME messages & attachments to pluggable ReceiptExtractor strategies'
+      }
+
+      pdfTextEngine = extractor 'Pure-Python PDF Layout Engine (pdf_text)' {
+        technology 'zlib FlateDecode • /ToUnicode CMap'
+        description 'Decompresses PDF streams, decodes CID/UTF-16BE glyph maps, and sorts text blocks by 2D (page, Y, X) coordinates'
+      }
+
+      nammaYatriExtractor = extractor 'NammaYatriPdfExtractor' {
+        technology 'from:nammayatri.in (invoice_*.pdf)'
+        description 'Extracts multi-ride auto fares, timestamps, and pickup/drop routes from Namma Yatri PDF invoices'
+      }
+
+      rapidoExtractor = extractor 'RapidoReceiptExtractor' {
+        technology 'from:rapido.bike (AUTO/CAB_RECEIPT_*.pdf)'
+        description 'Extracts Auto/Cab mode, fares, and pickup/drop addresses from Rapido PDF receipts and HTML emails'
+      }
+
+      swiggyExtractor = extractor 'SwiggyReceiptExtractor' {
+        technology 'from:noreply@swiggy.in'
+        description 'Extracts restaurant names and ordered dishes from Swiggy delivery confirmation emails'
+      }
+
+      amazonEmailExtractor = extractor 'AmazonEmailExtractor' {
+        technology 'from:auto-confirm@amazon.in'
+        description 'Extracts single/multi-shipment items and classifies Pharmacy, Groceries (Fresh), Electronics, Wellness, and Shopping'
+      }
+
+      travelExtractor = extractor 'TravelBookingExtractor' {
+        technology 'ConfirmTkt • IRCTC • MakeMyTrip'
+        description 'Extracts train routes, coach class, and PNRs plus hotel booking confirmations'
+      }
+
+      investmentExtractor = extractor 'InvestmentEmailExtractor' {
+        technology 'Shriram Finance • KFintech • MUFG'
+        description 'Extracts IPO allotments and FD interest/maturity principal transfers to Investments'
+      }
+    }
+
+    geocodingAdapters = layer 'Geocoding Adapters (expensieve.adapters.geocoding)' {
+      #adapter
+      nominatimGeocoder = component 'CachedNominatimGeocoder' {
+        technology 'SQLite (~110m Grid Cache)'
+        description 'SQLite-backed reverse geocoder calling OpenStreetMap Nominatim only on cache misses'
+      }
+    }
+
+    sinkAdapters = layer 'Ledger Sink Adapters (expensieve.adapters.sinks)' {
+      #adapter
+      #sink
+      sourdoughSink = component 'SourdoughLedgerSink' {
+        technology 'Wallet by BudgetBakers Adapter'
+        description 'Translates app-agnostic CanonicalTransactions and DebtLinkGroups into Sourdough Wallet records and atomic bulk_docs writes'
+      }
+    }
+  }
+
+  // Top-level & Cross-Layer Relationships
+  user -> hdfcBank 'Downloads periodic statement (.txt/.csv)'
+  user -> expensieve.cliLayer.sieveCli 'Runs ./sieve sync & ./sieve snap'
+  expensieve.cliLayer.sieveCli -> expensieve.serviceLayer.syncPipeline 'Configures adapters and triggers sync run'
+
+  // Pipeline Orchestration
+  expensieve.serviceLayer.syncPipeline -> expensieve.portsLayer.protocols 'Depends exclusively on PEP 544 Protocols'
+  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcSource '1. Parses new StatementRows after cutoff RRN'
+  expensieve.serviceLayer.syncPipeline -> expensieve.domainLayer.declarativeRules '2a. Collects baseline rule & UPI remark evidence (Priority 40-60)'
+  expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.adbSmsCollector '2b. Collects exact UTC timestamps by 12-digit RRN (Priority 40)'
+  expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.timelineGeoCollector '2c. Collects Metro/Auto/QR route & venue evidence (Priority 75)'
+  expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.merchantWebCollector '2d. Collects Zomato/Zepto/Blinkit/Amazon/Uber items (Priority 85)'
+  expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.gmailImapCollector '2e. Collects PDF & email invoice evidence (Priority 95)'
+  expensieve.serviceLayer.syncPipeline -> expensieve.serviceLayer.evidenceMerger '3. Merges all EnrichmentEvidence into CanonicalTransactions'
+  expensieve.serviceLayer.syncPipeline -> expensieve.sinkAdapters.sourdoughSink '4. Pushes verified CanonicalTransactions (dry-run or live)'
+
+  // Evidence Merger & Domain Core
+  expensieve.serviceLayer.evidenceMerger -> expensieve.domainLayer.models 'Produces CanonicalTransaction & verifies opening + sum(delta) == closing'
+  expensieve.domainLayer.declarativeRules -> expensieve.domainLayer.models 'Emits EnrichmentEvidence'
+  expensieve.domainLayer.gazetteer -> expensieve.domainLayer.models 'Snaps GeoPoint & normalizes addresses'
+
+  // Statement Adapter
+  expensieve.statementAdapters.hdfcSource -> hdfcBank 'Reads delimited statement file'
+  expensieve.statementAdapters.hdfcSource -> expensieve.domainLayer.models 'Emits StatementRow spine'
+
+  // Collectors & External Systems
+  expensieve.collectorAdapters.adbSmsCollector -> pixelPhone 'Runs adb shell content query --uri content://sms/inbox'
+  expensieve.collectorAdapters.timelineGeoCollector -> pixelPhone 'Reads exported Google Maps Timeline.json'
+  expensieve.collectorAdapters.timelineGeoCollector -> expensieve.domainLayer.gazetteer 'Snaps WGS-84 coordinates to Namma Metro stations & landmarks'
+  expensieve.collectorAdapters.timelineGeoCollector -> expensieve.geocodingAdapters.nominatimGeocoder 'Reverse geocodes unknown coordinates'
+  expensieve.geocodingAdapters.nominatimGeocoder -> nominatimApi 'Queries HTTPS reverse geocoding on SQLite cache miss'
+
+  expensieve.collectorAdapters.merchantWebCollector -> chromeBrowser 'Executes AppleScript JS on open Zomato/Zepto/Amazon tabs'
+
+  // Gmail & Pluggable Extractors
+  expensieve.collectorAdapters.gmailImapCollector -> gmailImap 'Searches X-GM-RAW & fetches RFC822 MIME messages over IMAP SSL'
+  expensieve.collectorAdapters.gmailImapCollector -> expensieve.collectorAdapters.nammaYatriExtractor 'Dispatches from:nammayatri.in messages'
+  expensieve.collectorAdapters.gmailImapCollector -> expensieve.collectorAdapters.rapidoExtractor 'Dispatches from:rapido.bike messages'
+  expensieve.collectorAdapters.gmailImapCollector -> expensieve.collectorAdapters.swiggyExtractor 'Dispatches from:noreply@swiggy.in messages'
+  expensieve.collectorAdapters.gmailImapCollector -> expensieve.collectorAdapters.amazonEmailExtractor 'Dispatches from:auto-confirm@amazon.in messages'
+  expensieve.collectorAdapters.gmailImapCollector -> expensieve.collectorAdapters.travelExtractor 'Dispatches ConfirmTkt / IRCTC / MakeMyTrip messages'
+  expensieve.collectorAdapters.gmailImapCollector -> expensieve.collectorAdapters.investmentExtractor 'Dispatches Shriram Finance / KFintech / MUFG IPO messages'
+
+  expensieve.collectorAdapters.nammaYatriExtractor -> expensieve.collectorAdapters.pdfTextEngine 'Extracts 2D-sorted lines from invoice_*.pdf'
+  expensieve.collectorAdapters.rapidoExtractor -> expensieve.collectorAdapters.pdfTextEngine 'Extracts 2D-sorted lines from AUTO/CAB_RECEIPT_*.pdf'
+  expensieve.collectorAdapters.nammaYatriExtractor -> expensieve.domainLayer.gazetteer 'Normalizes raw pickup/drop addresses to landmarks'
+  expensieve.collectorAdapters.rapidoExtractor -> expensieve.domainLayer.gazetteer 'Normalizes raw pickup/drop addresses to landmarks'
+
+  // Sink Adapter
+  expensieve.sinkAdapters.sourdoughSink -> sourdoughSdk 'Resolves categories/labels and builds RecordDocument payloads'
+  sourdoughSdk -> walletCouchDb 'Pushes atomic _bulk_docs and records local rollback journal.jsonl'
+}
+
+views {
+  view index {
+    title '1. System Context — ExpenSieve Ecosystem'
+    description 'High-level view of ExpenSieve, external financial/telemetry sources, and the target Wallet by BudgetBakers ledger sink.'
+
+    include
+      user,
+      hdfcBank,
+      pixelPhone,
+      gmailImap,
+      chromeBrowser,
+      nominatimApi,
+      expensieve,
+      sourdoughSdk,
+      walletCouchDb
+
+    style user {
+      color amber
+    }
+    style expensieve {
+      color indigo
+    }
+  }
+
+  view architecture of expensieve {
+    title '2. Hexagonal Architecture — Ports, Adapters & Domain Core'
+    description 'Internal layered architecture of ExpenSieve showing the CLI, SyncPipeline, EvidenceMerger, Pure Domain Core, and Driven/Driving Adapters.'
+
+    include
+      user,
+      hdfcBank,
+      pixelPhone,
+      gmailImap,
+      chromeBrowser,
+      sourdoughSdk,
+      expensieve.cliLayer.*,
+      expensieve.serviceLayer.*,
+      expensieve.domainLayer.*,
+      expensieve.portsLayer.*,
+      expensieve.statementAdapters.*,
+      expensieve.collectorAdapters.adbSmsCollector,
+      expensieve.collectorAdapters.timelineGeoCollector,
+      expensieve.collectorAdapters.merchantWebCollector,
+      expensieve.collectorAdapters.gmailImapCollector,
+      expensieve.geocodingAdapters.*,
+      expensieve.sinkAdapters.*
+  }
+
+  view collectors of expensieve.collectorAdapters {
+    title '3. Multi-Source Collectors, PDF Engine & Gmail Extractors'
+    description 'Detailed view of the Gmail IMAP collector, Pure-Python 2D PDF layout engine, Gazetteer snapping, and pluggable merchant extractors.'
+
+    include
+      pixelPhone,
+      gmailImap,
+      chromeBrowser,
+      nominatimApi,
+      expensieve.collectorAdapters.*,
+      expensieve.domainLayer.gazetteer,
+      expensieve.domainLayer.models,
+      expensieve.geocodingAdapters.nominatimGeocoder,
+      expensieve.serviceLayer.evidenceMerger
+  }
+
+  view domainAndMerger of expensieve.domainLayer {
+    title '4. Domain Core, Gazetteer Snapping & Evidence Priority Resolution'
+    description 'How StatementRows, EnrichmentEvidence (Priority 10..100), Gazetteer landmarks, and EvidenceMerger interact with zero I/O.'
+
+    include
+      expensieve.statementAdapters.hdfcSource,
+      expensieve.domainLayer.*,
+      expensieve.serviceLayer.evidenceMerger,
+      expensieve.serviceLayer.syncPipeline,
+      expensieve.sinkAdapters.sourdoughSink
+  }
+
+  dynamic view syncWorkflow {
+    title '5. End-to-End Reconciliation & Enrichment Pipeline Flow'
+    description 'Step-by-step execution trace when running ./sieve sync from HDFC statement ingestion to atomic CouchDB commit.'
+
+    user -> expensieve.cliLayer.sieveCli '1. Invokes ./sieve sync --statement Acct_Statement.txt'
+    expensieve.cliLayer.sieveCli -> expensieve.serviceLayer.syncPipeline '2. Initializes pipeline with configured collectors'
+    expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcSource '3. Parses statement & slices rows after cutoff_ref'
+    expensieve.serviceLayer.syncPipeline -> expensieve.domainLayer.declarativeRules '4. Runs regex & UPI remark rules (Priority 40-60)'
+    expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.adbSmsCollector '5. Matches 12-digit UPI RRNs to Pixel SMS for exact UTC timestamps'
+    expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.timelineGeoCollector '6. Snaps SMS UTC timestamps to Google Maps Timeline.json & Namma Metro Gazetteer (Priority 75)'
+    expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.merchantWebCollector '7. Matches Zomato, Zepto, Blinkit, Amazon & Uber orders (Priority 85)'
+    expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.gmailImapCollector '8. Extracts Namma Yatri & Rapido PDFs, Swiggy, Amazon, Train & Investment emails (Priority 95)'
+    expensieve.serviceLayer.syncPipeline -> expensieve.serviceLayer.evidenceMerger '9. Merges all evidence by priority, flags low-confidence rows as Needs Review, & verifies exact closing balance'
+    expensieve.serviceLayer.syncPipeline -> expensieve.sinkAdapters.sourdoughSink '10. Pushes verified CanonicalTransactions to Sourdough sink'
+    expensieve.sinkAdapters.sourdoughSink -> sourdoughSdk '11. Resolves categories/labels and executes atomic bulk_docs'
+    sourdoughSdk -> walletCouchDb '12. Commits records & writes rollback journal entry'
+  }
+}

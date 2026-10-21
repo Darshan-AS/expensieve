@@ -58,7 +58,9 @@ NAMMA_METRO_STATIONS: tuple[NamedPlace, ...] = (
     NamedPlace("Nadaprabhu Kempegowda Station, Majestic", GeoPoint(12.9757, 77.5728), "METRO_STATION"),
     NamedPlace("KSR Bengaluru City Railway Station", GeoPoint(12.9759, 77.5666), "METRO_STATION"),
     NamedPlace("Magadi Road", GeoPoint(12.9756, 77.5553), "METRO_STATION"),
-    NamedPlace("Sri Balagangadharanatha Swamiji Stn., Hosahalli", GeoPoint(12.9743, 77.5455), "METRO_STATION"),
+    NamedPlace(
+        "Sri Balagangadharanatha Swamiji Stn., Hosahalli", GeoPoint(12.9743, 77.5455), "METRO_STATION"
+    ),
     NamedPlace("Vijayanagar", GeoPoint(12.9708, 77.5374), "METRO_STATION"),
     NamedPlace("Attiguppe", GeoPoint(12.9619, 77.5336), "METRO_STATION"),
     NamedPlace("Deepanjali Nagar", GeoPoint(12.9521, 77.5370), "METRO_STATION"),
@@ -109,7 +111,9 @@ DEFAULT_LANDMARKS: tuple[NamedPlace, ...] = (
     NamedPlace("MS Ramaiah Hospital", GeoPoint(13.0285, 77.5705), "LANDMARK", radius_meters=500.0),
     NamedPlace("Vasanth Nagar", GeoPoint(12.9913, 77.5968), "LANDMARK", radius_meters=400.0),
     NamedPlace("Jawaharlal Nehru Planetarium", GeoPoint(12.9849, 77.5896), "LANDMARK", radius_meters=350.0),
-    NamedPlace("Prestige Shantiniketan (Whitefield)", GeoPoint(12.9896, 77.7279), "LANDMARK", radius_meters=450.0),
+    NamedPlace(
+        "Prestige Shantiniketan (Whitefield)", GeoPoint(12.9896, 77.7279), "LANDMARK", radius_meters=450.0
+    ),
     NamedPlace("Dhruvathare (NH75)", GeoPoint(12.9779, 76.8330), "LANDMARK", radius_meters=400.0),
     NamedPlace("Arasikere", GeoPoint(13.3205, 76.2555), "LANDMARK", radius_meters=2000.0),
 )
@@ -208,10 +212,7 @@ class Gazetteer:
         filtered = [
             p
             for p in parts
-            if not any(
-                skip in p.upper()
-                for skip in ("KARNATAKA", "INDIA", "BENGALURU", "BANGALORE", "560")
-            )
+            if not any(skip in p.upper() for skip in ("KARNATAKA", "INDIA", "BENGALURU", "BANGALORE", "560"))
         ]
         if filtered:
             return filtered[-1]

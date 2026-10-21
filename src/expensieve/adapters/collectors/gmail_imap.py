@@ -46,8 +46,7 @@ class ReceiptExtractor(Protocol):
         self,
         messages: Sequence[EmailMessagePayload],
         rows: Sequence[StatementRow],
-    ) -> Sequence[EnrichmentEvidence]:
-        ...
+    ) -> Sequence[EnrichmentEvidence]: ...
 
 
 def _decode_mime_header(raw: str | None) -> str:
@@ -68,7 +67,7 @@ def _extract_email_payload(uid: str, msg: Message) -> EmailMessagePayload:
     dt_raw = msg.get("Date")
     try:
         dt_utc = parsedate_to_datetime(dt_raw).astimezone(UTC) if dt_raw else datetime.now(UTC)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         dt_utc = datetime.now(UTC)
 
     text_chunks: list[str] = []
@@ -355,11 +354,7 @@ class RapidoReceiptExtractor:
         if not rows:
             return ()
 
-        rapido_rows = [
-            r
-            for r in rows
-            if not r.is_credit and "RAPIDO" in r.narration.upper()
-        ]
+        rapido_rows = [r for r in rows if not r.is_credit and "RAPIDO" in r.narration.upper()]
         all_debit_rows = [r for r in rows if not r.is_credit]
 
         used_rows: set[int] = set()
@@ -465,7 +460,11 @@ class RapidoReceiptExtractor:
                 if idx < n:
                     fare_minor = _parse_minor_amount(lines[idx])
                     idx += 1
-                while idx < n and not lines[idx].startswith("This document") and not lines[idx].startswith("*Selected"):
+                while (
+                    idx < n
+                    and not lines[idx].startswith("This document")
+                    and not lines[idx].startswith("*Selected")
+                ):
                     addr_lines.append(lines[idx].strip())
                     idx += 1
                 break
@@ -519,11 +518,7 @@ class AmazonEmailExtractor:
         messages: Sequence[EmailMessagePayload],
         rows: Sequence[StatementRow],
     ) -> Sequence[EnrichmentEvidence]:
-        amazon_rows = [
-            r
-            for r in rows
-            if not r.is_credit and "AMAZON" in r.narration.upper()
-        ]
+        amazon_rows = [r for r in rows if not r.is_credit and "AMAZON" in r.narration.upper()]
         if not amazon_rows:
             return ()
 
@@ -664,10 +659,7 @@ class AmazonEmailExtractor:
             )
         ):
             return "Electronics, accessories"
-        if any(
-            kw in upper
-            for kw in ("FACE MASK", "FACE WASH", "COMPACT", "CREAM", "OLAY", "LAKME", "SOAP")
-        ):
+        if any(kw in upper for kw in ("FACE MASK", "FACE WASH", "COMPACT", "CREAM", "OLAY", "LAKME", "SOAP")):
             return "Wellness, beauty"
         if any(kw in upper for kw in ("JOCKEY", "BIKINI", "SHIRT", "PANTS")):
             return "Clothes & Footwear"
@@ -1004,7 +996,7 @@ class GmailImapCollector:
                 evidences.extend(extractor.extract(msgs, rows))
 
             mail.logout()
-        except (OSError, imaplib.IMAP4.error):
+        except OSError, imaplib.IMAP4.error:
             return ()
 
         return evidences

@@ -80,15 +80,6 @@ wheels = [
 ]
 
 [[package]]
-name = "certifi"
-version = "2026.10.19"
-source = { registry = "http://airlock-proxy.uplink.goog:999/python/artifact-foundry-prod/python-3p-limited-internal-use/simple/" }
-sdist = { url = "http://airlock-proxy.uplink.goog:999/python/artifact-foundry-prod/python-3p-limited-internal-use/certifi/certifi-2026.10.19.tar.gz", hash = "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae" }
-wheels = [
-    { url = "http://airlock-proxy.uplink.goog:999/python/artifact-foundry-prod/python-3p-limited-internal-use/certifi/certifi-2026.10.19-py3-none-any.whl", hash = "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b" },
-]
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "http://airlock-proxy.uplink.goog:999/python/artifact-foundry-prod/python-3p-limited-internal-use/simple/" }
@@ -103,7 +94,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "rich" },
-    { name = "sourdough" },
     { name = "typer" },
 ]
 
@@ -117,7 +107,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "rich", specifier = ">=13.9.0" },
-    { name = "sourdough", editable = "../sourdough" },
     { name = "typer", specifier = ">=0.15.0" },
 ]
 
@@ -376,23 +365,6 @@ source = { registry = "http://airlock-proxy.uplink.goog:999/python/artifact-foun
 sdist = { url = "http://airlock-proxy.uplink.goog:999/python/artifact-foundry-prod/python-3p-limited-internal-use/shellingham/shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de" }
 wheels = [
     { url = "http://airlock-proxy.uplink.goog:999/python/artifact-foundry-prod/python-3p-limited-internal-use/shellingham/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686" },
-]
-
-[[package]]
-name = "sourdough"
-version = "0.1.0"
-source = { editable = "../sourdough" }
-dependencies = [
-    { name = "certifi" },
-    { name = "rich" },
-    { name = "typer" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "certifi", specifier = ">=2024.8.30" },
-    { name = "rich", specifier = ">=13.9.0" },
-    { name = "typer", specifier = ">=0.15.0" },
 ]
 
 [[package]]

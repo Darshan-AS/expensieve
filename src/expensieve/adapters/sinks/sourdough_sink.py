@@ -1,20 +1,12 @@
 """Wallet by BudgetBakers CouchDB LedgerSink adapter powered by `sourdough`."""
 
+import sys
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
-
-from sourdough.config import resolve_paths
-from sourdough.domain.builders import (
-    build_record,
-    build_transfer_pair,
-    utc_now_iso,
-)
-from sourdough.domain.enums import PaymentType, RecordState, RecordType
-from sourdough.domain.models import LabelDocument, RecordDocument
-from sourdough.services.records import WalletService
 
 from expensieve.domain.models import (
     CanonicalTransaction,
@@ -24,14 +16,47 @@ from expensieve.domain.models import (
 )
 
 
-def _map_payment_type(method: PaymentMethod) -> PaymentType:
+def _load_sourdough() -> Any:
+    """Dynamically load the sibling `sourdough` SDK so ExpenSieve remains standalone in CI."""
+    try:
+        import sourdough  # noqa: F401
+    except ImportError:
+        sibling_src = Path(__file__).resolve().parents[4] / "sourdough" / "src"
+        if sibling_src.is_dir() and str(sibling_src) not in sys.path:
+            sys.path.insert(0, str(sibling_src))
+
+    from sourdough.config import resolve_paths
+    from sourdough.domain.builders import (
+        build_record,
+        build_transfer_pair,
+        utc_now_iso,
+    )
+    from sourdough.domain.enums import PaymentType, RecordState, RecordType
+    from sourdough.domain.models import LabelDocument, RecordDocument
+    from sourdough.services.records import WalletService
+
+    return {
+        "resolve_paths": resolve_paths,
+        "build_record": build_record,
+        "build_transfer_pair": build_transfer_pair,
+        "utc_now_iso": utc_now_iso,
+        "PaymentType": PaymentType,
+        "RecordState": RecordState,
+        "RecordType": RecordType,
+        "LabelDocument": LabelDocument,
+        "RecordDocument": RecordDocument,
+        "WalletService": WalletService,
+    }
+
+
+def _map_payment_type(method: PaymentMethod, payment_type_enum: Any) -> Any:
     if method == PaymentMethod.DEBIT_CARD:
-        return PaymentType.DEBIT_CARD
+        return payment_type_enum.DEBIT_CARD
     if method == PaymentMethod.CREDIT_CARD:
-        return PaymentType.CREDIT_CARD
+        return payment_type_enum.CREDIT_CARD
     if method == PaymentMethod.CASH:
-        return PaymentType.CASH
-    return PaymentType.MOBILE_PAYMENT
+        return payment_type_enum.CASH
+    return payment_type_enum.MOBILE_PAYMENT
 
 
 class SourdoughLedgerSink:
@@ -39,8 +64,10 @@ class SourdoughLedgerSink:
 
     name = "sourdough_wallet"
 
-    def __init__(self, service: WalletService | None = None) -> None:
-        self._service = service or WalletService(paths=resolve_paths())
+    def __init__(self, service: Any | None = None) -> None:
+        sd = _load_sourdough()
+        self._sd = sd
+        self._service: Any = service or sd["WalletService"](paths=sd["resolve_paths"]())
 
     def _compute_live_account_balance(self, account_id: str) -> int:
         all_raw = self._service.client.all_docs_by_prefix("Record_")
@@ -73,6 +100,15 @@ class SourdoughLedgerSink:
         dry_run: bool = False,
     ) -> str:
         """Validate all documents, verify closing balance math, and bulk-push to CouchDB."""
+        LabelDocument = self._sd["LabelDocument"]
+        RecordDocument = self._sd["RecordDocument"]
+        PaymentType = self._sd["PaymentType"]
+        RecordState = self._sd["RecordState"]
+        RecordType = self._sd["RecordType"]
+        build_record = self._sd["build_record"]
+        build_transfer_pair = self._sd["build_transfer_pair"]
+        utc_now_iso = self._sd["utc_now_iso"]
+
         if dry_run:
             self._service.cache.ttl_seconds = 10**9
 
@@ -108,7 +144,7 @@ class SourdoughLedgerSink:
         transfer_cat = self._service.resolver.resolve_transfer_category()
 
         # Map debt groups by row_index
-        now_iso = utc_now_iso()
+        now_iso = str(utc_now_iso())
         row_to_debt_ref: dict[int, tuple[dict[str, Any], ...]] = {}
         debt_docs_to_put: list[dict[str, Any]] = []
         tx_by_row = {t.row_index: t for t in transactions}
@@ -147,11 +183,9 @@ class SourdoughLedgerSink:
         docs_to_put: list[dict[str, Any]] = list(debt_docs_to_put)
         for txn in transactions:
             amt_major = (Decimal(txn.amount_minor) / Decimal(100)).quantize(Decimal("0.01"))
-            p_type = _map_payment_type(txn.payment_method)
+            p_type = _map_payment_type(txn.payment_method, PaymentType)
             resolved_labels = tuple(
-                label_id_by_name[lbl.lower()]
-                for lbl in txn.labels
-                if lbl.lower() in label_id_by_name
+                label_id_by_name[lbl.lower()] for lbl in txn.labels if lbl.lower() in label_id_by_name
             )
             debt_ref = row_to_debt_ref.get(txn.row_index, ())
 
@@ -237,4 +271,4 @@ class SourdoughLedgerSink:
                 f"Post-sync balance mismatch for {account_name}: "
                 f"live={live_after}, expected={expected_closing_minor}"
             )
-        return entry.entry_id
+        return str(entry.entry_id)

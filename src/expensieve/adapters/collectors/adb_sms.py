@@ -95,7 +95,9 @@ class AdbSmsCollector:
         if self._cached_sms_path and self._cached_sms_path.exists():
             return self._cached_sms_path.read_text(encoding="utf-8")
 
-        epoch_ms = int(datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC).timestamp() * 1000)
+        epoch_ms = int(
+            datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC).timestamp() * 1000
+        )
         cmd = [
             self._adb_binary,
             "shell",
@@ -133,9 +135,7 @@ class AdbSmsCollector:
             if matched is None:
                 # Fallback match by (date_iso, amount_minor)
                 candidates = [
-                    a
-                    for a in alerts
-                    if a.amount_minor == row.amount_minor and a.date_iso == row.date_iso
+                    a for a in alerts if a.amount_minor == row.amount_minor and a.date_iso == row.date_iso
                 ]
                 if len(candidates) == 1:
                     matched = candidates[0]

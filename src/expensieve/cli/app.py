@@ -78,7 +78,9 @@ def sync_command(
     ] = False,
     gmail_user: Annotated[
         str | None,
-        typer.Option("--gmail-user", envvar="EXPENSIEVE_GMAIL_USER", help="Gmail address for IMAP receipt extraction."),
+        typer.Option(
+            "--gmail-user", envvar="EXPENSIEVE_GMAIL_USER", help="Gmail address for IMAP receipt extraction."
+        ),
     ] = None,
     gmail_app_password: Annotated[
         str | None,
@@ -111,11 +113,15 @@ def sync_command(
     collectors: list[EvidenceCollector] = [DeclarativeRuleCollector()]
 
     sms_collector = AdbSmsCollector(cached_sms_path=sms_cache)
-    sms_evs = sms_collector.collect(
-        rows,
-        rows[0].statement_date if rows else Path.cwd().stat().st_mtime,  # type: ignore[arg-type]
-        rows[-1].statement_date if rows else Path.cwd().stat().st_mtime,  # type: ignore[arg-type]
-    ) if rows else ()
+    sms_evs = (
+        sms_collector.collect(
+            rows,
+            rows[0].statement_date if rows else Path.cwd().stat().st_mtime,  # type: ignore[arg-type]
+            rows[-1].statement_date if rows else Path.cwd().stat().st_mtime,  # type: ignore[arg-type]
+        )
+        if rows
+        else ()
+    )
 
     row_ts_map = {
         ev.row_index: ev.timestamp_iso
@@ -177,6 +183,7 @@ def sync_command(
     console.print(table)
 
     if output_json:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "account": summary.account_name,
             "row_count": summary.row_count,

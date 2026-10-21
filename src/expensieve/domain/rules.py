@@ -96,12 +96,30 @@ def infer_category_from_upi_note(note_upper: str, payee_upper: str) -> tuple[str
         return "Coffee, Tea & Cafe", ""
     if any(
         k in note_upper
-        for k in ("JUICE", "MILKSHAKE", "FLAVOURED MILK", "LASSI", "SUGARCANE", "TENDER COCONUT", "BADAM MILK")
+        for k in (
+            "JUICE",
+            "MILKSHAKE",
+            "FLAVOURED MILK",
+            "LASSI",
+            "SUGARCANE",
+            "TENDER COCONUT",
+            "BADAM MILK",
+        )
     ):
         return "Juice & Milkshake", ""
     if any(
         k in note_upper
-        for k in ("ICE CREAM", "ICECREAM", "KULFI", "CAKE", "KINDER JOY", "CHOCOLATE", "SWEET", "DESSERT", "PASTRY")
+        for k in (
+            "ICE CREAM",
+            "ICECREAM",
+            "KULFI",
+            "CAKE",
+            "KINDER JOY",
+            "CHOCOLATE",
+            "SWEET",
+            "DESSERT",
+            "PASTRY",
+        )
     ):
         return "Desserts & Sweets", ""
 
@@ -160,7 +178,9 @@ def infer_category_from_upi_note(note_upper: str, payee_upper: str) -> tuple[str
     ):
         return "Meals & Fast Food", ""
 
-    if any(k in note_upper for k in ("GROCER", "MILK", "CURD", "VEGETABLE", "FRUIT", "EGG", "BREAD", "ICE APPLE")):
+    if any(
+        k in note_upper for k in ("GROCER", "MILK", "CURD", "VEGETABLE", "FRUIT", "EGG", "BREAD", "ICE APPLE")
+    ):
         return "Groceries", ""
     if "WATER BILL" in note_upper or "ELECTRICITY" in note_upper:
         return "Energy, utilities", ""

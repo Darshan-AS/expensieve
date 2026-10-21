@@ -239,11 +239,7 @@ class TimelineGeoCollector:
 
             # 3. Stationary Place Visit for unknown BharatPe / QR merchants
             if "BHARATPE" in narr_u:
-                active_visits = [
-                    v
-                    for v in visits
-                    if v.start_utc <= txn_utc <= v.end_utc
-                ]
+                active_visits = [v for v in visits if v.start_utc <= txn_utc <= v.end_utc]
                 if active_visits:
                     best_vis = active_visits[-1]
                     place_lbl = self._resolve_point_label(best_vis.point)
