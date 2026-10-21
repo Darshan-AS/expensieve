@@ -103,7 +103,10 @@ class AdbSmsCollector:
             "shell",
             f"content query --uri content://sms/inbox --projection date:address:body --where 'date >= {epoch_ms}'",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=20)
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=20)
+        except OSError, subprocess.SubprocessError:
+            return ""
         if res.returncode != 0 or not res.stdout.strip():
             return ""
         if self._cached_sms_path:

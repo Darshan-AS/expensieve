@@ -16,6 +16,7 @@ from expensieve.adapters.collectors.timeline_geo import TimelineGeoCollector
 from expensieve.adapters.geocoding.nominatim_cache import CachedNominatimGeocoder
 from expensieve.adapters.sinks.sourdough_sink import SourdoughLedgerSink
 from expensieve.adapters.statements.hdfc_delimited import HdfcDelimitedStatementSource
+from expensieve.domain.architecture import compile_architecture_bundle
 from expensieve.domain.gazetteer import Gazetteer
 from expensieve.domain.models import GeoPoint
 from expensieve.domain.rules import DeclarativeRuleCollector
@@ -208,6 +209,49 @@ def snap_coordinate(
     console.print(f"[bold]Coordinate:[/bold] {pt.lat:.5f}, {pt.lng:.5f}")
     console.print(f"[bold]Nearest Metro Station:[/bold] {metro or 'None (<900m)'}")
     console.print(f"[bold]Nearest Landmark:[/bold]      {landmark or 'None'}")
+
+
+def sync_architecture_diagrams(root_dir: Path, check_only: bool = False) -> tuple[str, ...]:
+    """Write or verify `architecture/likec4.config.json`, `architecture/topology.c4`, and `ARCHITECTURE.md`."""
+    bundle = compile_architecture_bundle()
+    targets: tuple[tuple[Path, str], ...] = (
+        (root_dir / "architecture" / "likec4.config.json", bundle.likec4_config_json),
+        (root_dir / "architecture" / "topology.c4", bundle.likec4_dsl),
+        (root_dir / "ARCHITECTURE.md", bundle.architecture_markdown),
+    )
+    out_of_sync: list[str] = []
+    for path, expected in targets:
+        current = path.read_text(encoding="utf-8") if path.exists() else None
+        if current != expected:
+            rel = str(path.relative_to(root_dir))
+            out_of_sync.append(rel)
+            if not check_only:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(expected, encoding="utf-8")
+    return tuple(out_of_sync)
+
+
+@app.command("diagram")
+def diagram_command(
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Verify that architecture/topology.c4 and ARCHITECTURE.md are in sync."),
+    ] = False,
+) -> None:
+    """Compile or verify deterministic LikeC4 (`architecture/topology.c4`) and `ARCHITECTURE.md` diagrams."""
+    root_dir = Path(__file__).resolve().parents[3]
+    changed = sync_architecture_diagrams(root_dir, check_only=check)
+    if check:
+        if changed:
+            console.print(f"[red]✘ Architecture files out of sync: {', '.join(changed)}[/red]")
+            raise typer.Exit(code=1)
+        console.print("[green]✔ LikeC4 topology & ARCHITECTURE.md are in sync.[/green]")
+        return
+
+    if changed:
+        console.print(f"[green]✔ Updated architecture artifacts: {', '.join(changed)}[/green]")
+    else:
+        console.print("[green]✔ Architecture artifacts already up to date.[/green]")
 
 
 def main() -> None:

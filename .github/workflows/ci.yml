@@ -1,4 +1,4 @@
-name: CI — Quality Gates, Tests & LikeC4 Architecture
+name: CI — Quality Gates & Unit Tests
 
 on:
   push:
@@ -9,8 +9,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -45,55 +43,9 @@ jobs:
       - name: Run Pytest unit & integration test suite
         run: uv run --no-sync pytest -v
 
-      - name: Smoke-test ./sieve CLI, Namma Metro Gazetteer & Staged Sync
+      - name: Smoke-test ./sieve CLI, Gazetteer, Diagram Sync & Staged Sync
         run: |
           ./sieve --help
+          ./sieve diagram --check
           ./sieve snap "12.9962°, 77.6685°"
           ./sieve sync --statement tests/fixtures/sample_statement.txt --output dist/staged_transactions.json
-
-  likec4-architecture:
-    name: LikeC4 — Validate & Build Architecture Diagrams
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install LikeC4 CLI
-        run: npm install --no-save likec4
-
-      - name: Validate LikeC4 DSL model (docs/architecture/expensieve.c4)
-        run: npx likec4 validate docs/architecture
-
-      - name: Build static interactive LikeC4 architecture portal
-        run: npx likec4 build docs/architecture -o dist/architecture
-
-      - name: Upload compiled LikeC4 site artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: expensieve-likec4-architecture
-          path: dist/architecture
-          retention-days: 14
-
-      - name: Upload GitHub Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist/architecture
-
-  deploy-architecture-pages:
-    name: GitHub Pages — Publish Interactive LikeC4 Architecture
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [quality-and-tests, likec4-architecture]
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy LikeC4 viewer to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
