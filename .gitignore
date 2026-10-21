@@ -1,0 +1,20 @@
+# Python & uv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Personal statements, caches & state
+Acct_Statement_*
+*.pdf
+*.csv
+Timeline.json
+.expensieve_state.json
+.expensieve_cache/
+staged_*.json
