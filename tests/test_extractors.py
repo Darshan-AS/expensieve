@@ -861,6 +861,64 @@ class TestDcbNiyoGlobalAndAesPdf(unittest.TestCase):
         self.assertEqual(merged_grab[1].foreign_amount_minor, 206)
         self.assertEqual(merged_grab[1].amount_minor, 4864)
 
+    def test_equitas_niyo_rules_and_helpers(self) -> None:
+        from datetime import date
+
+        from expensieve.adapters.statements.equitas_niyo import _extract_reference_no
+        from expensieve.domain.rules import DeclarativeRuleCollector
+
+        self.assertEqual(
+            _extract_reference_no("IMP 116621247128 BANKACCOUNTVALIDATIONTRANSFER CR"),
+            "116621247128",
+        )
+        self.assertEqual(
+            _extract_reference_no("UPI REF NO 202712935652SHIVANANDA A B UPITRANSFER CR"),
+            "202712935652",
+        )
+        self.assertEqual(
+            _extract_reference_no("CARD AMC +GST:070124/150805268"),
+            "070124/150805268",
+        )
+
+        eq_rows = [
+            _make_row(
+                0,
+                "2021-06-15",
+                "IMP 116621247128 BANKACCOUNTVALIDATIONTRANSFER CR -IMPS INWARD SETTLEMENT",
+                credit_minor=100,
+                ref="116621247128",
+            ),
+            _make_row(
+                1,
+                "2022-01-27",
+                "IMP 202712637811 P2AFINNEW SOLUTIONS PRINIYOX REWARDS TRANSFERCR - IMPS INWARDSETTLEMENT",
+                credit_minor=3800,
+                ref="202712637811",
+            ),
+            _make_row(
+                2,
+                "2023-01-25",
+                "CARD ANNUALMAINTENAN:240123/124988359 [TS: 2023-01-25T13:45:21.000Z]",
+                debit_minor=23482,
+                ref="240123/124988359",
+            ),
+            _make_row(
+                3,
+                "2026-06-18",
+                "CREDIT INTEREST CAPITALISED (ACCOUNT CLOSURE PRO-RATA INTEREST) [TS: 2026-06-18T15:01:15.000Z]",
+                credit_minor=24300,
+            ),
+        ]
+        rule_evs = DeclarativeRuleCollector().collect(eq_rows, date(2021, 6, 15), date(2026, 6, 18))
+        self.assertEqual(rule_evs[0].category, "Refunds and Cashbacks")
+        self.assertEqual(rule_evs[0].payee, "NiyoX")
+        self.assertEqual(rule_evs[1].payee, "Niyo (Finnew Solutions)")
+        self.assertEqual(rule_evs[2].category, "Charges, fees")
+        self.assertEqual(rule_evs[2].payee, "Equitas Bank")
+        self.assertEqual(rule_evs[2].timestamp_iso, "2023-01-25T13:45:21.000Z")
+        self.assertEqual(rule_evs[3].category, "Interests, dividends")
+        self.assertEqual(rule_evs[3].note, "Pro-rata savings interest credited on account closure")
+
 
 if __name__ == "__main__":
     unittest.main()

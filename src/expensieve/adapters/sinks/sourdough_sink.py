@@ -460,7 +460,13 @@ class SourdoughLedgerSink:
                 docs_to_put.append(d_out)
                 docs_to_put.append(d_in)
             else:
-                cat_doc = resolve_cat_fn(txn.category)
+                try:
+                    cat_doc = resolve_cat_fn(txn.category)
+                except LookupError:
+                    if txn.category.lower() == "refunds and cashbacks":
+                        cat_doc = resolve_cat_fn("Refunds (tax, purchase)")
+                    else:
+                        raise
                 r_type = RecordType.INCOME if txn.signed_delta_minor > 0 else RecordType.EXPENSE
 
                 existing_match, split_ids = self._find_existing_non_transfer_match(
@@ -482,10 +488,29 @@ class SourdoughLedgerSink:
                         existing_rec.record_date.endswith("T00:00:00.000Z")
                         and not norm_ts.endswith("T00:00:00.000Z")
                     )
+                    is_debt_linked = bool(existing_rec.ref_objects)
+                    upgrade_cat = not is_debt_linked and existing_rec.category_id != cat_doc.doc_id
+                    upgrade_note = bool(txn.note) and (
+                        not existing_rec.note
+                        or (
+                            not is_debt_linked
+                            and existing_rec.note.strip().lower() == "credit interest capitalised"
+                            and txn.note != existing_rec.note
+                        )
+                    )
+                    upgrade_payee = bool(txn.payee) and (
+                        not existing_rec.payee
+                        or (
+                            not is_debt_linked
+                            and existing_rec.payee.strip().lower() == "niyox"
+                            and txn.payee != existing_rec.payee
+                        )
+                    )
                     need_rec_upd = (
                         has_better_ts
-                        or (txn.note and not existing_rec.note)
-                        or (txn.payee and not existing_rec.payee)
+                        or upgrade_cat
+                        or upgrade_note
+                        or upgrade_payee
                         or (debt_ref and not existing_rec.ref_objects)
                     )
                     if need_rec_upd:
@@ -493,8 +518,9 @@ class SourdoughLedgerSink:
                         upd_rec = replace(
                             existing_rec,
                             record_date=norm_ts if has_better_ts else existing_rec.record_date,
-                            note=existing_rec.note or txn.note,
-                            payee=existing_rec.payee or txn.payee,
+                            category_id=cat_doc.doc_id if upgrade_cat else existing_rec.category_id,
+                            note=txn.note if upgrade_note else (existing_rec.note or txn.note),
+                            payee=txn.payee if upgrade_payee else (existing_rec.payee or txn.payee),
                             ref_objects=existing_rec.ref_objects or debt_ref,
                             reserved_updated_at=now_iso,
                         ).to_couch_dict()

@@ -19,6 +19,10 @@ from expensieve.adapters.statements.dcb_niyo import (
     DEFAULT_DCB_PDF_PASSWORDS,
     DcbNiyoStatementSource,
 )
+from expensieve.adapters.statements.equitas_niyo import (
+    DEFAULT_EQUITAS_PDF_PASSWORDS,
+    EquitasNiyoStatementSource,
+)
 from expensieve.adapters.statements.hdfc_cc_pdf import (
     DEFAULT_CC_PDF_PASSWORDS,
     HdfcCreditCardPdfStatementSource,
@@ -172,9 +176,9 @@ def sync_command(
     passwords = (
         tuple(pdf_password)
         if pdf_password
-        else (*DEFAULT_CC_PDF_PASSWORDS, *DEFAULT_DCB_PDF_PASSWORDS)
+        else (*DEFAULT_CC_PDF_PASSWORDS, *DEFAULT_DCB_PDF_PASSWORDS, *DEFAULT_EQUITAS_PDF_PASSWORDS)
     )
-    is_niyo_account = account.upper().startswith("NIYO") or "DCB" in account.upper()
+    acc_u = account.upper()
     source: StatementSource
     if fetch_niyo_gmail:
         if not gmail_user or not gmail_app_password:
@@ -204,13 +208,27 @@ def sync_command(
         )
     elif statement is not None:
         stmt_name_lower = statement.name.lower()
+        is_equitas_stmt = (
+            acc_u == "NIYOX"
+            or "EQUITAS" in acc_u
+            or "6096" in stmt_name_lower
+            or "equitas" in stmt_name_lower
+            or "niyo_attachments" in stmt_name_lower
+        )
         is_dcb_stmt = (
-            is_niyo_account
+            "FOREX" in acc_u
+            or "DCB" in acc_u
             or "dcb" in stmt_name_lower
-            or "niyo" in stmt_name_lower
             or "5157" in stmt_name_lower
         )
-        if is_dcb_stmt:
+        if is_equitas_stmt:
+            target_acc = "NiyoX" if account == "HDFC" else account
+            source = EquitasNiyoStatementSource(
+                statement_path=statement,
+                account_name=target_acc,
+                passwords=passwords,
+            )
+        elif is_dcb_stmt:
             target_acc = "NiyoX Forex" if account == "HDFC" else account
             source = DcbNiyoStatementSource(
                 path=statement,

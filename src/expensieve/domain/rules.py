@@ -16,6 +16,7 @@ from expensieve.domain.models import (
 
 _IST_TZ = timezone(timedelta(hours=5, minutes=30))
 _POS_TIME_PAT = re.compile(r"(?:VS/\d{12}/|\()(\d{2}:\d{2}:\d{2})(?:/|\))")
+_TS_TAG_PAT = re.compile(r"\[TS:\s*([^\]]+)\]")
 _FCY_TAG_PAT = re.compile(r"\[FCY:\s*([A-Z]{3})\s+([\d.]+)\s*@\s*([\d.]+)\s*INR/[A-Z]{3}\]", re.IGNORECASE)
 
 GENERIC_UPI_NOTES: frozenset[str] = frozenset(
@@ -551,6 +552,9 @@ class DeclarativeRuleCollector:
         )
 
     def _extract_pos_timestamp_utc(self, row: StatementRow) -> str | None:
+        m_ts = _TS_TAG_PAT.search(row.narration)
+        if m_ts:
+            return m_ts.group(1).strip()
         m_tm = _POS_TIME_PAT.search(row.narration)
         if not m_tm:
             return None
@@ -583,6 +587,100 @@ class DeclarativeRuleCollector:
         kind: TransactionKind,
     ) -> EnrichmentEvidence:
         pos_ts_utc = self._extract_pos_timestamp_utc(row)
+
+        if "BANKACCOUNTVALIDATIONTRANSFER" in narr_u:
+            ref_suffix = f" (IMPS Ref {row.reference_no})" if row.reference_no else ""
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Refunds and Cashbacks",
+                payee="NiyoX",
+                note=f"Penny-drop bank account validation credit{ref_suffix}",
+                needs_review=False,
+            )
+        if "REWARDSURPRISE" in narr_u:
+            ref_suffix = f" (IMPS Ref {row.reference_no})" if row.reference_no else ""
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Refunds and Cashbacks",
+                payee="NiyoX",
+                note=f"NiyoX surprise reward cashback{ref_suffix}",
+                needs_review=False,
+            )
+        if "P2AFINNEW SOLUTIONS" in narr_u or "PRINIYOX REWARDS" in narr_u:
+            ref_suffix = f" (Finnew Solutions IMPS Ref {row.reference_no})" if row.reference_no else ""
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Refunds and Cashbacks",
+                payee="Niyo (Finnew Solutions)",
+                note=f"NiyoX rewards cashback{ref_suffix}",
+                needs_review=False,
+            )
+        if "202712935652" in narr_u and "SHIVANANDA A B" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Lending, renting",
+                payee="Savitha M D",
+                note="Savitha M D \u2192 Me : Operation fees for uncle Ashoka (UPI Ref 202712935652 via Shivananda A B)",
+                needs_review=False,
+            )
+        if "CREDIT INTERESTCAPITALISED" in narr_u or "CREDIT INTEREST CAPITALISED" in narr_u:
+            int_note = (
+                "Pro-rata savings interest credited on account closure"
+                if "CLOSURE PRO-RATA" in narr_u
+                else "Savings account quarterly interest"
+            )
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Interests, dividends",
+                payee="Equitas Bank",
+                note=int_note,
+                needs_review=False,
+            )
+        if "CARD ANNUALMAINTENAN" in narr_u or "CARD AMC +GST" in narr_u:
+            ref_suffix = f" (AMC + GST, Ref {row.reference_no})" if row.reference_no else " (AMC + GST)"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Charges, fees",
+                payee="Equitas Bank",
+                note=f"NiyoX Visa Platinum debit card annual maintenance fee{ref_suffix}",
+                needs_review=False,
+            )
 
         if "UPI:REC:" in narr_u or "IMPS:REC:" in narr_u:
             mode = "UPI" if "UPI:REC:" in narr_u else "IMPS"

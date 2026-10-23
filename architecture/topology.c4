@@ -245,6 +245,16 @@ model {
           sources 'Local PDF/JSON or Gmail IMAP (bankstatement@dcb.bank.in, alerts@dcb.bank.in)'
         }
       }
+
+      component equitasNiyoSource 'EquitasNiyoStatementSource' {
+        #spine
+        description 'Decrypts AES-128-CBC + /ObjStm Equitas Small Finance Bank (NiyoX) PDF statement chains and merges Insta-Alert timestamps'
+        technology 'AES-128-CBC + /ObjStm PDF Decryptor • Multi-PDF Chainer'
+        metadata {
+          supported_formats '.pdf (*6096.pdf), niyo_emails.json (Equitas SFB NiyoX)'
+          sources 'Local PDF directory/file + Insta-Alerts (customercare@equitasbank.com)'
+        }
+      }
     }
 
     layer collectorAdapters 'Evidence Collector Adapters (expensieve.adapters.collectors)' {
@@ -383,6 +393,7 @@ model {
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcSource '1a. Parses new bank StatementRows after cutoff RRN'
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcCcPdfSource '1b. Decrypts & parses HDFC Credit Card PDF StatementRows'
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.dcbNiyoSource '1c. Decrypts DCB Niyo PDF & chains post-statement alerts'
+  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.equitasNiyoSource '1d. Decrypts Equitas NiyoX PDF statement chain & alerts'
   expensieve.serviceLayer.syncPipeline -> expensieve.domainLayer.declarativeRules '2a. Collects baseline rule & UPI remark evidence (Priority 40..60)'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.adbSmsCollector '2b. Collects exact UTC timestamps by 12-digit RRN (Priority 40)'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.timelineGeoCollector '2c. Collects Metro/Auto/QR route & venue evidence (Priority 75)'
@@ -405,6 +416,9 @@ model {
   expensieve.statementAdapters.dcbNiyoSource -> gmail_imap 'Fetches encrypted DCB Bank PDFs & real-time transaction alerts'
   expensieve.statementAdapters.dcbNiyoSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts AES-128-CBC streams & extracts 2D table rows'
   expensieve.statementAdapters.dcbNiyoSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine with inferred SGD/MYR forex'
+  expensieve.statementAdapters.equitasNiyoSource -> gmail_imap 'Reads encrypted Equitas PDFs & Insta-Alerts'
+  expensieve.statementAdapters.equitasNiyoSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts AES-128-CBC + /ObjStm streams & extracts 2D table rows'
+  expensieve.statementAdapters.equitasNiyoSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine'
 
   // Collectors & External Systems
   expensieve.collectorAdapters.adbSmsCollector -> pixel_phone 'Queries content://sms/inbox over ADB'
