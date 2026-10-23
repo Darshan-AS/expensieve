@@ -22,9 +22,13 @@ def _load_sourdough() -> Any:
     try:
         import sourdough  # noqa: F401
     except ImportError:
-        sibling_src = Path(__file__).resolve().parents[4] / "sourdough" / "src"
-        if sibling_src.is_dir() and str(sibling_src) not in sys.path:
-            sys.path.insert(0, str(sibling_src))
+        for cand_src in (
+            Path.cwd().parent / "sourdough" / "src",
+            Path(__file__).resolve().parents[5] / "sourdough" / "src",
+        ):
+            if cand_src.is_dir() and str(cand_src) not in sys.path:
+                sys.path.insert(0, str(cand_src))
+                break
 
     from sourdough.config import resolve_paths
     from sourdough.domain.builders import (
@@ -34,7 +38,7 @@ def _load_sourdough() -> Any:
         utc_now_iso,
     )
     from sourdough.domain.enums import PaymentType, RecordState, RecordType
-    from sourdough.domain.models import LabelDocument, RecordDocument
+    from sourdough.domain.models import CurrencyDocument, LabelDocument, RecordDocument
     from sourdough.services.records import WalletService
 
     return {
@@ -46,6 +50,7 @@ def _load_sourdough() -> Any:
         "PaymentType": PaymentType,
         "RecordState": RecordState,
         "RecordType": RecordType,
+        "CurrencyDocument": CurrencyDocument,
         "LabelDocument": LabelDocument,
         "RecordDocument": RecordDocument,
         "WalletService": WalletService,
@@ -70,9 +75,24 @@ class SourdoughLedgerSink:
     def __init__(self, service: Any | None = None) -> None:
         sd = _load_sourdough()
         self._sd = sd
-        self._service: Any = service or sd["WalletService"](paths=sd["resolve_paths"]())
+        if service is not None:
+            self._service: Any = service
+        else:
+            explicit_state: str | None = None
+            if not (Path.cwd() / ".wallet_state.json").exists():
+                for cand_state in (
+                    Path.cwd().parent / "sourdough" / ".wallet_state.json",
+                    Path(__file__).resolve().parents[5] / "sourdough" / ".wallet_state.json",
+                ):
+                    if cand_state.is_file():
+                        explicit_state = str(cand_state)
+                        break
+            self._service = sd["WalletService"](paths=sd["resolve_paths"](explicit_state))
 
     def _compute_live_account_balance(self, account_id: str) -> int:
+        snap = self._service.cache.get_snapshot()
+        acc = snap.accounts_by_id.get(account_id)
+        acc_curr_id = acc.currency_id if acc is not None else None
         all_raw = self._service.client.all_docs_by_prefix("Record_")
         total_minor = 0
         for r in all_raw:
@@ -81,7 +101,11 @@ class SourdoughLedgerSink:
                 and not r.get("_deleted")
                 and r.get("accountId") == account_id
             ):
-                amt = int(r.get("amount", 0))
+                rec_curr_id = r.get("currencyId")
+                if acc_curr_id and rec_curr_id and rec_curr_id != acc_curr_id:
+                    amt = int(r.get("refAmount", r.get("amount", 0)))
+                else:
+                    amt = int(r.get("amount", 0))
                 if int(r.get("type", 1)) == 0:
                     total_minor += amt
                 else:
@@ -137,7 +161,8 @@ class SourdoughLedgerSink:
                 continue
 
             rec_amt = int(raw.get("amount", 0))
-            if rec_amt == amount_minor:
+            rec_ref = int(raw.get("refAmount", rec_amt))
+            if rec_amt == amount_minor or rec_ref == amount_minor:
                 exact_candidates.append((day_diff, raw))
             by_date.setdefault(rec_dt_str, []).append(raw)
 
@@ -146,7 +171,10 @@ class SourdoughLedgerSink:
             return (exact_candidates[0][1], ())
 
         for group in by_date.values():
-            if len(group) >= 2 and sum(int(r.get("amount", 0)) for r in group) == amount_minor:
+            if len(group) >= 2 and (
+                sum(int(r.get("amount", 0)) for r in group) == amount_minor
+                or sum(int(r.get("refAmount", r.get("amount", 0))) for r in group) == amount_minor
+            ):
                 return (None, tuple(str(r["_id"]) for r in group))
 
         return (None, ())
@@ -160,6 +188,7 @@ class SourdoughLedgerSink:
         dry_run: bool = False,
     ) -> str:
         """Validate all documents, verify closing balance math, and bulk-push to CouchDB."""
+        CurrencyDocument = self._sd["CurrencyDocument"]
         LabelDocument = self._sd["LabelDocument"]
         RecordDocument = self._sd["RecordDocument"]
         PaymentType = self._sd["PaymentType"]
@@ -174,6 +203,34 @@ class SourdoughLedgerSink:
 
         snap = self._service.cache.get_snapshot(force_refresh=not dry_run)
         label_id_by_name = {lbl.name.lower(): lbl.doc_id for lbl in snap.labels}
+        currency_by_code = {c.code.upper(): c for c in snap.currencies}
+        default_fx_ratios = {
+            "SGD": 1.0 / 75.29,
+            "MYR": 1.0 / 23.62,
+            "USD": 1.0 / 84.00,
+            "EUR": 1.0 / 91.00,
+        }
+        needed_fcy_codes = sorted(
+            {
+                txn.foreign_currency.upper()
+                for txn in transactions
+                if txn.foreign_currency and txn.foreign_amount_minor
+            }
+        )
+        for idx_c, fcy_code in enumerate(needed_fcy_codes):
+            if fcy_code not in currency_by_code:
+                ratio = default_fx_ratios.get(fcy_code, 0.01)
+                if dry_run or not hasattr(self._service, "add_currency"):
+                    currency_by_code[fcy_code] = CurrencyDocument(
+                        doc_id=f"-Currency_{uuid.uuid4()}",
+                        code=fcy_code,
+                        referential=False,
+                        ratio_to_referential=ratio,
+                    )
+                else:
+                    self._service.add_currency(fcy_code, ratio, position=3000 + idx_c * 1000)
+                    snap = self._service.cache.get_snapshot(force_refresh=True)
+                    currency_by_code = {c.code.upper(): c for c in snap.currencies}
 
         # Ensure "Needs Review" label exists if any transaction requires it
         if "needs review" not in label_id_by_name and "needs-review" not in label_id_by_name:
@@ -204,7 +261,16 @@ class SourdoughLedgerSink:
         transfer_cat = self._service.resolver.resolve_transfer_category()
         normalize_timestamp_input = self._sd["normalize_timestamp_input"]
 
-        existing_raw_records = self._service.client.all_docs_by_prefix("Record_")
+        cached_recs = (
+            self._service.cache.get_cached_records()
+            if dry_run and hasattr(self._service.cache, "get_cached_records")
+            else None
+        )
+        existing_raw_records = (
+            cached_recs
+            if cached_recs is not None
+            else self._service.client.all_docs_by_prefix("Record_")
+        )
         consumed_record_ids: set[str] = set()
         before_docs: list[dict[str, Any]] = []
 
@@ -312,6 +378,29 @@ class SourdoughLedgerSink:
                     if hasattr(self._service, "find_matching_transfer")
                     else None
                 )
+                rehomed_to_primary = False
+                if (
+                    matched_pair is None
+                    and account_name.lower() == "niyox forex"
+                    and hasattr(self._service, "find_matching_transfer")
+                ):
+                    try:
+                        legacy_niyo = self._service.resolver.resolve_account("NiyoX")
+                        legacy_from = legacy_niyo.doc_id if from_acc.doc_id == primary_acc.doc_id else from_acc.doc_id
+                        legacy_to = legacy_niyo.doc_id if to_acc.doc_id == primary_acc.doc_id else to_acc.doc_id
+                        matched_pair = self._service.find_matching_transfer(
+                            from_account_id=legacy_from,
+                            to_account_id=legacy_to,
+                            amount_minor=txn.amount_minor,
+                            date_iso=txn.timestamp_iso,
+                            tolerance_days=2,
+                            raw_records=unconsumed_raw,
+                        )
+                        if matched_pair is not None:
+                            rehomed_to_primary = True
+                    except LookupError, ValueError, RuntimeError:
+                        matched_pair = None
+
                 if matched_pair is not None:
                     out_raw, in_raw = matched_pair
                     consumed_record_ids.add(str(out_raw["_id"]))
@@ -319,7 +408,8 @@ class SourdoughLedgerSink:
                     out_existing = RecordDocument.from_couch_dict(out_raw)
                     in_existing = RecordDocument.from_couch_dict(in_raw)
                     need_update = (
-                        (txn.note and not out_existing.note)
+                        rehomed_to_primary
+                        or (txn.note and not out_existing.note)
                         or (txn.payee and not out_existing.payee)
                         or (resolved_labels and not out_existing.labels)
                     )
@@ -327,15 +417,19 @@ class SourdoughLedgerSink:
                         before_docs.extend([dict(out_raw), dict(in_raw)])
                         upd_out = replace(
                             out_existing,
-                            note=out_existing.note or txn.note,
-                            payee=out_existing.payee or txn.payee,
+                            account_id=from_acc.doc_id,
+                            transfer_account_id=to_acc.doc_id,
+                            note=txn.note if rehomed_to_primary and txn.note else (out_existing.note or txn.note),
+                            payee=txn.payee if rehomed_to_primary and txn.payee else (out_existing.payee or txn.payee),
                             labels=out_existing.labels or resolved_labels,
                             reserved_updated_at=now_iso,
                         ).to_couch_dict()
                         upd_in = replace(
                             in_existing,
-                            note=in_existing.note or txn.note,
-                            payee=in_existing.payee or txn.payee,
+                            account_id=to_acc.doc_id,
+                            transfer_account_id=from_acc.doc_id,
+                            note=txn.note if rehomed_to_primary and txn.note else (in_existing.note or txn.note),
+                            payee=txn.payee if rehomed_to_primary and txn.payee else (in_existing.payee or txn.payee),
                             labels=in_existing.labels or resolved_labels,
                             reserved_updated_at=now_iso,
                         ).to_couch_dict()
@@ -407,12 +501,27 @@ class SourdoughLedgerSink:
                         docs_to_put.append(upd_rec)
                     continue
 
+                rec_curr = primary_curr
+                rec_amt_major = amt_major
+                rec_ref_major: Decimal | None = None
+                if (
+                    txn.foreign_currency
+                    and txn.foreign_amount_minor
+                    and txn.foreign_currency.upper() in currency_by_code
+                ):
+                    rec_curr = currency_by_code[txn.foreign_currency.upper()]
+                    rec_amt_major = (Decimal(txn.foreign_amount_minor) / Decimal(100)).quantize(
+                        Decimal("0.01")
+                    )
+                    rec_ref_major = amt_major
+
                 rec_doc = build_record(
                     owner_id=self._service.replication.owner_id,
                     account=primary_acc,
-                    currency=primary_curr,
+                    currency=rec_curr,
                     category=cat_doc,
-                    amount_major=amt_major,
+                    amount_major=rec_amt_major,
+                    ref_amount_major=rec_ref_major,
                     record_type=r_type,
                     payment_type=p_type,
                     record_state=RecordState.CLEARED,

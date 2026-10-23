@@ -254,5 +254,58 @@ class TimelineGeoCollector:
                                 needs_review=True,
                             )
                         )
+                continue
+
+            # 4. Card POS / ECOM transactions matched against Timeline visits or transit segments
+            if narr_u.startswith(("POS/", "POS ", "ECOM/", "ECOM ")):
+                near_visits = [
+                    v
+                    for v in visits
+                    if (v.start_utc.timestamp() - 3600)
+                    <= txn_utc.timestamp()
+                    <= (v.end_utc.timestamp() + 3600)
+                ]
+                near_acts = [
+                    a
+                    for a in activities
+                    if (a.start_utc.timestamp() - 3600)
+                    <= txn_utc.timestamp()
+                    <= (a.end_utc.timestamp() + 43200 if "SIMPLYGO" in narr_u else a.end_utc.timestamp() + 3600)
+                ]
+                geo_note: str | None = None
+                if near_visits:
+                    best_vis = min(
+                        near_visits,
+                        key=lambda v: min(
+                            abs((v.start_utc - txn_utc).total_seconds()),
+                            abs((v.end_utc - txn_utc).total_seconds()),
+                        ),
+                    )
+                    lbl = self._resolve_point_label(best_vis.point)
+                    if lbl:
+                        geo_note = f"At {lbl}"
+                elif near_acts:
+                    best_act = min(
+                        near_acts,
+                        key=lambda a: abs((a.end_utc - txn_utc).total_seconds()),
+                    )
+                    s_lbl = self._resolve_point_label(best_act.start_point)
+                    e_lbl = self._resolve_point_label(best_act.end_point)
+                    if s_lbl and e_lbl and s_lbl != e_lbl:
+                        geo_note = f"{s_lbl} to {e_lbl}"
+                    elif e_lbl or s_lbl:
+                        geo_note = f"Near {e_lbl or s_lbl}"
+
+                if geo_note:
+                    evidences.append(
+                        EnrichmentEvidence(
+                            source_name=self.name,
+                            priority=EvidencePriority.DECLARATIVE_RULE,
+                            confidence=0.90,
+                            row_index=row.row_index,
+                            note=geo_note,
+                            needs_review=False,
+                        )
+                    )
 
         return evidences

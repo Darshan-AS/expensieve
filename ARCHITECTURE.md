@@ -38,7 +38,7 @@ flowchart LR
         CLI["Typer CLI (./sieve)\nsync | snap | diagram"]
         PIPE["SyncPipeline\nOrchestrator"]
         MERGER["EvidenceMerger\nPriority 10..95 + Balance Math"]
-        GAZ["Gazetteer\n55 Metro Stations + 14 Landmarks"]
+        GAZ["Gazetteer\n55 Metro Stations + 58 Landmarks"]
         CLI --> PIPE --> MERGER
         PIPE --> GAZ
     end

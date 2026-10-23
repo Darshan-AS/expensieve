@@ -1,4 +1,4 @@
-"""Pure-Python PDF text extractor supporting RC4 Standard Security decryption, FlateDecode streams, ToUnicode CMaps, and 2D layout sorting."""
+"""Pure-Python PDF text extractor supporting RC4 and AES-128 (/AESV2) Standard Security decryption, FlateDecode streams, ToUnicode CMaps, and 2D layout sorting."""
 
 import hashlib
 import re
@@ -8,6 +8,64 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 PDF_PADDING: bytes = bytes.fromhex("28bf4e5e4e758a4164004e56fffa01082e2e00b6d0683e802f0ca9fe6453697a")
+
+
+def _gf_mul(a: int, b: int) -> int:
+    p = 0
+    for _ in range(8):
+        if b & 1:
+            p ^= a
+        hi = a & 0x80
+        a = (a << 1) & 0xFF
+        if hi:
+            a ^= 0x1B
+        b >>= 1
+    return p
+
+
+def _init_aes_tables() -> tuple[
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+]:
+    sbox = [0] * 256
+    inv_sbox = [0] * 256
+    p, q = 1, 1
+    while True:
+        p = (p ^ (p << 1) ^ (0x11B if p & 0x80 else 0)) & 0xFF
+        q ^= q << 1
+        q ^= q << 2
+        q ^= q << 4
+        q = (q ^ (0x09 if q & 0x80 else 0)) & 0xFF
+        xformed = (
+            q
+            ^ ((q << 1) | (q >> 7))
+            ^ ((q << 2) | (q >> 6))
+            ^ ((q << 3) | (q >> 5))
+            ^ ((q << 4) | (q >> 4))
+            ^ 0x63
+        )
+        sbox[p] = xformed & 0xFF
+        if p == 1:
+            break
+    sbox[0] = 0x63
+    for idx, val in enumerate(sbox):
+        inv_sbox[val] = idx
+    return (
+        tuple(sbox),
+        tuple(inv_sbox),
+        tuple(_gf_mul(x, 9) for x in range(256)),
+        tuple(_gf_mul(x, 11) for x in range(256)),
+        tuple(_gf_mul(x, 13) for x in range(256)),
+        tuple(_gf_mul(x, 14) for x in range(256)),
+    )
+
+
+_AES_SBOX, _AES_INV_SBOX, _AES_MUL9, _AES_MUL11, _AES_MUL13, _AES_MUL14 = _init_aes_tables()
+_AES_RCON: tuple[int, ...] = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +80,7 @@ class PdfEncryptInfo:
     revision: int
     key_length_bits: int
     file_id_0: bytes
+    is_aes: bool = False
 
 
 def rc4_crypt(key: bytes, data: bytes) -> bytes:
@@ -42,6 +101,86 @@ def rc4_crypt(key: bytes, data: bytes) -> bytes:
         j = (j + s[i]) & 0xFF
         s[i], s[j] = s[j], s[i]
         out[idx] = byte_val ^ s[(s[i] + s[j]) & 0xFF]
+    return bytes(out)
+
+
+def aes128_cbc_decrypt(key: bytes, data: bytes) -> bytes:
+    """Pure-Python AES-128-CBC decryptor (first 16 bytes IV + PKCS#7 padding) for PDF `/AESV2` streams."""
+    if len(key) != 16 or len(data) < 32 or len(data) % 16 != 0:
+        return data
+    rk = [list(key[i : i + 4]) for i in range(0, 16, 4)]
+    for i in range(4, 44):
+        temp = list(rk[i - 1])
+        if i % 4 == 0:
+            temp = [
+                _AES_SBOX[temp[1]] ^ _AES_RCON[i // 4 - 1],
+                _AES_SBOX[temp[2]],
+                _AES_SBOX[temp[3]],
+                _AES_SBOX[temp[0]],
+            ]
+        rk.append([rk[i - 4][j] ^ temp[j] for j in range(4)])
+    round_keys = [[rk[r * 4 + c][r_idx] for c in range(4) for r_idx in range(4)] for r in range(11)]
+
+    out = bytearray()
+    prev = data[:16]
+    for blk_off in range(16, len(data), 16):
+        cur = data[blk_off : blk_off + 16]
+        s = [cur[i] ^ round_keys[10][i] for i in range(16)]
+        for rnd in range(9, 0, -1):
+            s = [
+                _AES_INV_SBOX[s[0]],
+                _AES_INV_SBOX[s[13]],
+                _AES_INV_SBOX[s[10]],
+                _AES_INV_SBOX[s[7]],
+                _AES_INV_SBOX[s[4]],
+                _AES_INV_SBOX[s[1]],
+                _AES_INV_SBOX[s[14]],
+                _AES_INV_SBOX[s[11]],
+                _AES_INV_SBOX[s[8]],
+                _AES_INV_SBOX[s[5]],
+                _AES_INV_SBOX[s[2]],
+                _AES_INV_SBOX[s[15]],
+                _AES_INV_SBOX[s[12]],
+                _AES_INV_SBOX[s[9]],
+                _AES_INV_SBOX[s[6]],
+                _AES_INV_SBOX[s[3]],
+            ]
+            rk_r = round_keys[rnd]
+            s = [s[i] ^ rk_r[i] for i in range(16)]
+            ns = [0] * 16
+            for c in range(4):
+                b0, b1, b2, b3 = s[c * 4], s[c * 4 + 1], s[c * 4 + 2], s[c * 4 + 3]
+                ns[c * 4] = _AES_MUL14[b0] ^ _AES_MUL11[b1] ^ _AES_MUL13[b2] ^ _AES_MUL9[b3]
+                ns[c * 4 + 1] = _AES_MUL9[b0] ^ _AES_MUL14[b1] ^ _AES_MUL11[b2] ^ _AES_MUL13[b3]
+                ns[c * 4 + 2] = _AES_MUL13[b0] ^ _AES_MUL9[b1] ^ _AES_MUL14[b2] ^ _AES_MUL11[b3]
+                ns[c * 4 + 3] = _AES_MUL11[b0] ^ _AES_MUL13[b1] ^ _AES_MUL9[b2] ^ _AES_MUL14[b3]
+            s = ns
+        s = [
+            _AES_INV_SBOX[s[0]],
+            _AES_INV_SBOX[s[13]],
+            _AES_INV_SBOX[s[10]],
+            _AES_INV_SBOX[s[7]],
+            _AES_INV_SBOX[s[4]],
+            _AES_INV_SBOX[s[1]],
+            _AES_INV_SBOX[s[14]],
+            _AES_INV_SBOX[s[11]],
+            _AES_INV_SBOX[s[8]],
+            _AES_INV_SBOX[s[5]],
+            _AES_INV_SBOX[s[2]],
+            _AES_INV_SBOX[s[15]],
+            _AES_INV_SBOX[s[12]],
+            _AES_INV_SBOX[s[9]],
+            _AES_INV_SBOX[s[6]],
+            _AES_INV_SBOX[s[3]],
+        ]
+        rk0 = round_keys[0]
+        for i in range(16):
+            out.append(s[i] ^ rk0[i] ^ prev[i])
+        prev = cur
+    if out:
+        pad = out[-1]
+        if 1 <= pad <= 16 and all(b == pad for b in out[-pad:]):
+            del out[-pad:]
     return bytes(out)
 
 
@@ -131,6 +270,8 @@ def parse_pdf_encrypt_dict(data: bytes) -> PdfEncryptInfo | None:
     version = int(m_v.group(1)) if m_v else 2
     revision = int(m_r.group(1)) if m_r else 3
     default_bits = 40 if version == 1 else 128
+    raw_len = int(m_len.group(1)) if m_len else default_bits
+    key_length_bits = raw_len * 8 if raw_len <= 32 else raw_len
     return PdfEncryptInfo(
         encrypt_obj_id=enc_oid,
         owner_hash=_get_bytes_field(b"/O"),
@@ -138,8 +279,9 @@ def parse_pdf_encrypt_dict(data: bytes) -> PdfEncryptInfo | None:
         permissions=int(m_p.group(1)),
         version=version,
         revision=revision,
-        key_length_bits=int(m_len.group(1)) if m_len else default_bits,
+        key_length_bits=key_length_bits,
         file_id_0=bytes.fromhex(m_id.group(1).decode("ascii")),
+        is_aes=b"/AESV2" in ebody,
     )
 
 
@@ -248,10 +390,12 @@ def _extract_pdf_blocks(
                 raw_s = raw_s[:-1]
 
             if decryption_key is not None:
+                is_aes = enc_info is not None and enc_info.is_aes
+                salt = b"sAlT" if is_aes else b""
                 obj_key = hashlib.md5(
-                    decryption_key + struct.pack("<I", oid)[:3] + struct.pack("<I", gen)[:2]
+                    decryption_key + struct.pack("<I", oid)[:3] + struct.pack("<I", gen)[:2] + salt
                 ).digest()[: min(len(decryption_key) + 5, 16)]
-                raw_s = rc4_crypt(obj_key, raw_s)
+                raw_s = aes128_cbc_decrypt(obj_key, raw_s) if is_aes else rc4_crypt(obj_key, raw_s)
 
             try:
                 obj_streams[oid] = zlib.decompress(raw_s.rstrip(b"\r\n")).decode("latin1", errors="replace")

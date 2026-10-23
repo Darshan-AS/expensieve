@@ -1,7 +1,9 @@
 """Priority-based EvidenceMerger that joins StatementRows with multi-source EnrichmentEvidence."""
 
+import re
 from collections import defaultdict
 from collections.abc import Sequence
+from decimal import Decimal
 
 from expensieve.domain.models import (
     CanonicalTransaction,
@@ -10,6 +12,8 @@ from expensieve.domain.models import (
     StatementRow,
     TransactionKind,
 )
+
+_FCY_NARR_PAT = re.compile(r"\[FCY:\s*([A-Z]{3})\s+([\d.]+)", re.IGNORECASE)
 
 
 class EvidenceMerger:
@@ -49,6 +53,12 @@ class EvidenceMerger:
             payee = ""
             note = row.narration
             transfer_acc: str | None = None
+            fcy_code: str | None = None
+            fcy_minor: int | None = None
+            m_fcy = _FCY_NARR_PAT.search(row.narration)
+            if m_fcy:
+                fcy_code = m_fcy.group(1).upper()
+                fcy_minor = int((Decimal(m_fcy.group(2)) * Decimal(100)).quantize(Decimal(1)))
             timestamp_iso = f"{row.date_iso}T06:30:00Z"
             labels_set: list[str] = []
             best_conf = 0.5
@@ -72,6 +82,10 @@ class EvidenceMerger:
                     note = ev.note
                 if ev.transfer_account is not None:
                     transfer_acc = ev.transfer_account
+                if ev.foreign_currency is not None:
+                    fcy_code = ev.foreign_currency
+                if ev.foreign_amount_minor is not None:
+                    fcy_minor = ev.foreign_amount_minor
                 for lbl in ev.labels:
                     if lbl not in labels_set:
                         labels_set.append(lbl)
@@ -100,6 +114,8 @@ class EvidenceMerger:
                     payee=payee,
                     note=note,
                     transfer_account=transfer_acc,
+                    foreign_currency=fcy_code,
+                    foreign_amount_minor=fcy_minor,
                     labels=tuple(labels_set),
                     confidence=best_conf,
                     needs_review=needs_review,

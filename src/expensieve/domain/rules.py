@@ -3,7 +3,7 @@
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta, timezone
 
 from expensieve.adapters.statements.hdfc_delimited import parse_upi_narration
 from expensieve.domain.models import (
@@ -13,6 +13,10 @@ from expensieve.domain.models import (
     StatementRow,
     TransactionKind,
 )
+
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+_POS_TIME_PAT = re.compile(r"(?:VS/\d{12}/|\()(\d{2}:\d{2}:\d{2})(?:/|\))")
+_FCY_TAG_PAT = re.compile(r"\[FCY:\s*([A-Z]{3})\s+([\d.]+)\s*@\s*([\d.]+)\s*INR/[A-Z]{3}\]", re.IGNORECASE)
 
 GENERIC_UPI_NOTES: frozenset[str] = frozenset(
     {
@@ -266,7 +270,22 @@ class DeclarativeRuleCollector:
                 needs_review=False,
             )
 
-        if "NIYOX" in narr_u or "NIYO GLOBAL" in narr_u:
+        if "DCBL" in narr_u or "DCB BANK" in narr_u or "NIYO GLOBAL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=pay_method,
+                category="Transfer, withdraw",
+                payee="NiyoX Forex",
+                note="Transfer to NiyoX Forex",
+                transfer_account="NiyoX Forex",
+                needs_review=False,
+            )
+
+        if "NIYOX" in narr_u or "EQUITAS" in narr_u or "ESFB" in narr_u:
             return EnrichmentEvidence(
                 source_name=self.name,
                 priority=EvidencePriority.DECLARATIVE_RULE,
@@ -531,6 +550,31 @@ class DeclarativeRuleCollector:
             needs_review=True,
         )
 
+    def _extract_pos_timestamp_utc(self, row: StatementRow) -> str | None:
+        m_tm = _POS_TIME_PAT.search(row.narration)
+        if not m_tm:
+            return None
+        try:
+            dt_ist = datetime.strptime(f"{row.date_iso} {m_tm.group(1)}", "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=_IST_TZ
+            )
+            return dt_ist.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return None
+
+    def _format_fcy_note(self, row: StatementRow, base_note: str) -> str:
+        m_fcy = _FCY_TAG_PAT.search(row.narration)
+        note = base_note
+        if m_fcy:
+            ccy, fcy_amt, rate = m_fcy.group(1).upper(), m_fcy.group(2), m_fcy.group(3)
+            fcy_clause = f"{ccy} {fcy_amt} @ ₹{rate}/{ccy}"
+            if fcy_clause not in note:
+                note = f"{note} ({fcy_clause})" if note else fcy_clause
+        for tw in self._trip_windows:
+            if tw.matches_date(row.statement_date) and not note.startswith(tw.prefix):
+                note = f"{tw.prefix} {note}".strip()
+        return note
+
     def _classify_non_upi(
         self,
         row: StatementRow,
@@ -538,6 +582,527 @@ class DeclarativeRuleCollector:
         narr_u: str,
         kind: TransactionKind,
     ) -> EnrichmentEvidence:
+        pos_ts_utc = self._extract_pos_timestamp_utc(row)
+
+        if "UPI:REC:" in narr_u or "IMPS:REC:" in narr_u:
+            mode = "UPI" if "UPI:REC:" in narr_u else "IMPS"
+            ref_part = f" (Ref {row.rrn_12})" if row.rrn_12 else ""
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="HDFC",
+                note=f"{mode} transfer from HDFC Bank{ref_part}",
+                transfer_account="HDFC",
+                needs_review=False,
+            )
+        if "SB INT." in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Interests, dividends",
+                payee="DCB Bank",
+                note="Savings account quarterly interest",
+                needs_review=False,
+            )
+        if "RAZ*FINNEW" in narr_u:
+            finnew_note = (
+                "Niyo Global card verification charge refund (Finnew Solutions via Razorpay)"
+                if row.is_credit
+                else "Niyo Global card verification charge (Finnew Solutions via Razorpay, refunded)"
+            )
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Charges, fees",
+                payee="Niyo (Finnew Solutions)",
+                note=finnew_note,
+                needs_review=False,
+            )
+        if "HELLORIDE_S" in narr_u:
+            hr_route = (
+                "Funan / Coleman St (City Hall) to OCBC Skyway, Gardens by the Bay"
+                if row.date_iso == "2026-10-01"
+                else "Gardens by the Bay to Esplanade Drive (Marina Bay)"
+            )
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Rentals",
+                payee="HelloRide Singapore",
+                note=self._format_fcy_note(row, f"HelloRide bicycle rental: {hr_route}"),
+                needs_review=False,
+            )
+        if "DA WEI ARTS" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Gifts, joy",
+                payee="Da Wei Arts & Crafts",
+                note=self._format_fcy_note(
+                    row,
+                    "Souvenirs at Da Wei Arts & Crafts (Pagoda Street / Eu Tong Sen St, Chinatown MRT Exit C, Singapore)",
+                ),
+                needs_review=False,
+            )
+        if "TRANSIT /" in narr_u or "TRANSIT/" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Metro",
+                payee="SimplyGo Transit",
+                note=self._format_fcy_note(
+                    row,
+                    "Singapore SimplyGo MRT/Bus pass at Dhoby Ghaut MRT (Orchard Promenade)",
+                ),
+                needs_review=False,
+            )
+        if "BUS/MRT" in narr_u:
+            mrt_routes_by_amt: dict[int, str] = {
+                14139: "Singapore SimplyGo MRT: Chinatown MRT to Dhoby Ghaut MRT",
+                31000: (
+                    "Singapore SimplyGo Bus & MRT: Dhoby Ghaut to Marina Bay Sands "
+                    "& Science Centre Singapore (Jurong East)"
+                ),
+                15745: "Singapore SimplyGo MRT: Dhoby Ghaut MRT to Raffles Place MRT (Lau Pa Sat)",
+                51724: (
+                    "Singapore SimplyGo Bus & MRT: Bayfront to HarbourFront (VivoCity), "
+                    "Dhoby Ghaut to Pasir Panjang & Sentosa, Gardens by the Bay to Marine Parade (Katong)"
+                ),
+                15018: "Singapore SimplyGo Bus: Joo Chiat Complex to Pasir Panjang Rd (Google Singapore)",
+                39091: "Singapore SimplyGo MRT & Cross-Border Bus: Labrador Park MRT to JB Sentral CIQ (Johor Bahru)",
+            }
+            mrt_desc = mrt_routes_by_amt.get(
+                row.amount_minor, "Singapore SimplyGo contactless Bus/MRT rides"
+            )
+            mrt_cat = "Bus" if row.amount_minor in (15018, 39091) else "Metro"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category=mrt_cat,
+                payee="SimplyGo Bus/MRT",
+                note=self._format_fcy_note(row, mrt_desc),
+                needs_review=False,
+            )
+        if "KLOOK TRAVE" in narr_u and "[PARENT:" not in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Culture, sport events",
+                payee="Klook",
+                note=self._format_fcy_note(
+                    row,
+                    "Klook booking: Science Centre Singapore tickets (15 Science Centre Rd, Jurong East, booked at Marina Bay Sands)",
+                ),
+                needs_review=False,
+            )
+        if "IJOOZ" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Juice & Milkshake",
+                payee="iJooz Singapore",
+                note=self._format_fcy_note(
+                    row,
+                    "Fresh orange juice from iJooz smart vending machine at Science Centre Singapore (15 Science Centre Rd, Jurong East)",
+                ),
+                needs_review=False,
+            )
+        if "LHFOODCO" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Meals & Fast Food",
+                payee="LH Food Co",
+                note=self._format_fcy_note(
+                    row,
+                    "Snack / beverage at LH Food Co, Science Centre Singapore (15 Science Centre Rd, Jurong East)",
+                ),
+                needs_review=False,
+            )
+        if "KOPITIAM" in narr_u and "AU PA SAT" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Meals & Fast Food",
+                payee="Kopitiam @ Lau Pa Sat",
+                note=self._format_fcy_note(
+                    row,
+                    "Late-night dinner at Kopitiam @ Lau Pa Sat hawker centre (18 Raffles Quay, Downtown Core, Singapore)",
+                ),
+                needs_review=False,
+            )
+        if "BREADTALK" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Snacks & Chaats",
+                payee="BreadTalk VivoCity",
+                note=self._format_fcy_note(
+                    row,
+                    "Bakery snacks at BreadTalk VivoCity (1 HarbourFront Walk, HarbourFront MRT, Singapore)",
+                ),
+                needs_review=False,
+            )
+        if "SENTOSA EXP" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Metro",
+                payee="Sentosa Express",
+                note=self._format_fcy_note(
+                    row,
+                    "Sentosa Express monorail pass: VivoCity Station (Lobby L, Level 3) to Resorts World Station (Universal Studios & Singapore Oceanarium, Sentosa)",
+                ),
+                needs_review=False,
+            )
+        if "7-ELEVEN-26" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Snacks & Chaats",
+                payee="7-Eleven Singapore",
+                note=self._format_fcy_note(
+                    row,
+                    "Snacks & drinks at 7-Eleven, 266 Joo Chiat Road (near Betel Box Hostel, Katong / Geylang East, Singapore)",
+                ),
+                needs_review=False,
+            )
+        if "ENERGETIC P" in narr_u and "LARKI" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Bus",
+                payee="Energetic Point Larkin Sentral",
+                note=self._format_fcy_note(
+                    row,
+                    "Express bus tickets (Larkin Sentral, Johor Bahru to Melaka Sentral) at Energetic Point counter, Jalan Garuda, Larkin, JB",
+                ),
+                needs_review=False,
+            )
+        if "IPAY88" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Culture, sport events",
+                payee="Encore Melaka",
+                note=self._format_fcy_note(
+                    row,
+                    "Encore Melaka theatre show tickets (Impression City, Kota Syahbandar, Klebang, Melaka): 2x Adult, Seats B3(M32), B3(M33), Booking B47213F914, Ref WT00082387 via iPay88",
+                ),
+                needs_review=False,
+            )
+        if "GRAB" in narr_u:
+            if row.amount_minor == 224360:
+                grab_base = (
+                    "GrabCar pre-authorization reversal for KL Sentral (Axiata Tower, Brickfields) to KLIA Terminal 1 (Sepang)"
+                    if row.is_credit
+                    else "GrabCar pre-authorization hold for KL Sentral (Axiata Tower, Brickfields) to KLIA Terminal 1 (Sepang, 70.6 km, reversed)"
+                )
+            else:
+                grab_base = "GrabCar ride in Malaysia"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Cab",
+                payee="Grab",
+                note=self._format_fcy_note(row, grab_base),
+                needs_review=False,
+            )
+        if "VSPACE PLT" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Meals & Fast Food",
+                payee="VSpace Melaka",
+                note=self._format_fcy_note(
+                    row,
+                    "Refreshments / cafe at VSpace PLT, Lorong Jambatan / Jalan Kampung Pantai (Melaka River Walk & Jonker Walk, Bandar Hilir, Melaka)",
+                ),
+                needs_review=False,
+            )
+        if "3414-7-ELEV" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Snacks & Chaats",
+                payee="7-Eleven Malaysia",
+                note=self._format_fcy_note(
+                    row,
+                    "Snacks & drinks at 7-Eleven (#3414), Lorong Hang Jebat (Jonker Walk / Dutch Square Stadhuys, Bandar Hilir, Melaka)",
+                ),
+                needs_review=False,
+            )
+        if "RAPID RAIL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Metro",
+                payee="RapidKL Rail",
+                note=self._format_fcy_note(
+                    row,
+                    "RapidKL LRT Sri Petaling Line ticket: Bandar Tasik Selatan (TBS Bus Terminal) to Masjid Jamek (Jalan Tun Perak, Kuala Lumpur)",
+                ),
+                needs_review=False,
+            )
+        if "SWISS HOTEL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Holiday, trips, hotels",
+                payee="Swiss Hotel Kuala Lumpur",
+                note=self._format_fcy_note(
+                    row,
+                    "Malaysia Tourism Tax (RM 10/night x 3 nights) at Swiss Hotel Kuala Lumpur (12 Jalan Tuanku Abdul Rahman, near Masjid Jamek LRT)",
+                ),
+                needs_review=False,
+            )
+        if "7-ELEVEN MA" in narr_u:
+            if row.date_iso == "2026-10-05" or row.amount_minor == 56198:
+                seven_loc = "7-Eleven at SkyAvenue Mall (Gohtong Way, near SkySymphony, Resorts World Genting Highlands)"
+            elif "/15:14:" in narr_u or row.amount_minor == 11806:
+                seven_loc = "7-Eleven at Lorong Medan Tuanku 1 (near Medan Tuanku Monorail, Chow Kit, Kuala Lumpur)"
+            else:
+                seven_loc = "7-Eleven at Jalan Tuanku Abdul Rahman (near Kompleks Pertama, Chow Kit, Kuala Lumpur)"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Snacks & Chaats",
+                payee="7-Eleven Malaysia",
+                note=self._format_fcy_note(row, f"Convenience store snacks & drinks at {seven_loc}"),
+                needs_review=False,
+            )
+        if "MMZ MELATI" in narr_u:
+            is_breakfast = "/07:" in narr_u or "/08:" in narr_u or "/09:" in narr_u
+            meal_type = "Breakfast" if is_breakfast else "Dinner"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Meals & Fast Food",
+                payee="Restoran MMZ Melati",
+                note=self._format_fcy_note(
+                    row,
+                    f"{meal_type} at Restoran MMZ Melati (Jalan Masjid India / Jalan Melayu, near Swiss Hotel & Masjid Jamek, Kuala Lumpur)",
+                ),
+                needs_review=False,
+            )
+        if "SRI RAMAYAN" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Culture, sport events",
+                payee="Ramayana Cave (Batu Caves)",
+                note=self._format_fcy_note(
+                    row,
+                    "Ramayana Cave entry tickets (2x RM 15) at Batu Caves Temple Complex (Jalan Station, Gombak, Selangor)",
+                ),
+                needs_review=False,
+            )
+        if "MAGICA SNOW" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Culture, sport events",
+                payee="Magica Snow House",
+                note=self._format_fcy_note(
+                    row,
+                    "Magica Snow House entry tickets (2x RM 10) at Batu Caves Temple Complex (Jalan Station, Gombak, Selangor)",
+                ),
+                needs_review=False,
+            )
+        if "PLANETARIUM" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Culture, sport events",
+                payee="Planetarium Negara",
+                note=self._format_fcy_note(
+                    row,
+                    "Planetarium Negara exhibition tickets (2x RM 12 Adult, 53 Jalan Perdana, Perdana Botanical Gardens near Masjid Negara, Kuala Lumpur)",
+                ),
+                needs_review=False,
+            )
+        if "REVPAYM*MAK" in narr_u or "HALL ST" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Meals & Fast Food",
+                payee="Makan Hall St",
+                note=self._format_fcy_note(
+                    row,
+                    "Early dinner / refreshments at Makan Hall St, Central Market (Pasar Seni, Jalan Hang Kasturi, Kuala Lumpur)",
+                ),
+                needs_review=False,
+            )
+        if "THE HERITAG" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Culture, sport events",
+                payee="The Heritage Gallery",
+                note=self._format_fcy_note(
+                    row,
+                    "The Heritage Gallery entry / souvenir at Central Market / Medan Pasar (Jalan Benteng, Old Market Square, Kuala Lumpur)",
+                ),
+                needs_review=False,
+            )
+        if "GENTING -KL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=kind,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Bus",
+                payee="Go Genting Express Bus",
+                note=self._format_fcy_note(
+                    row,
+                    "Go Genting Express Bus tickets (2x RM 10): KL Sentral (Lower Ground Bus Hub, Brickfields) to Awana Bus Terminal (Awana SkyCentral, Genting Highlands)",
+                ),
+                needs_review=False,
+            )
         if "GOOGLE IT SERVICES INDIA" in narr_u:
             return EnrichmentEvidence(
                 source_name=self.name,
@@ -593,7 +1158,21 @@ class DeclarativeRuleCollector:
                 transfer_account="Cash",
                 needs_review=False,
             )
-        if "TO NIYOX" in narr_u or ("ARASIKERE SHIVANANDA DARSHAN" in narr_u and "DCBL" in narr_u):
+        if "DCBL" in narr_u or "DCB BANK" in narr_u or "NIYOX GLOBAL" in narr_u or "NIYO GLOBAL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="NiyoX Forex",
+                note="Transfer to NiyoX Forex",
+                transfer_account="NiyoX Forex",
+                needs_review=False,
+            )
+        if "TO NIYOX" in narr_u or ("ARASIKERE SHIVANANDA DARSHAN" in narr_u and "ESFB" in narr_u):
             return EnrichmentEvidence(
                 source_name=self.name,
                 priority=EvidencePriority.DECLARATIVE_RULE,

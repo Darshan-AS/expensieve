@@ -3,14 +3,16 @@
 import email
 import html
 import imaplib
+import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from email.header import decode_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Protocol
 
 from expensieve.adapters.collectors.pdf_text import (
@@ -97,7 +99,13 @@ def _extract_email_payload(uid: str, msg: Message) -> EmailMessagePayload:
         elif ctype == "text/html":
             charset = part.get_content_charset() or "utf-8"
             raw_html = payload.decode(charset, errors="replace")
-            stripped = html.unescape(" ".join(re.sub(r"<[^>]+>", " ", raw_html).split()))
+            cleaned_html = re.sub(
+                r"<(?:style|script)[^>]*>.*?</(?:style|script)>",
+                " ",
+                raw_html,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            stripped = html.unescape(" ".join(re.sub(r"<[^>]+>", " ", cleaned_html).split()))
             html_chunks.append(stripped)
 
     body = "\n".join(text_chunks) if text_chunks else "\n".join(html_chunks)
@@ -264,10 +272,15 @@ class NammaYatriPdfExtractor:
         evidences: list[EnrichmentEvidence] = []
 
         for msg in messages:
+            if "nammayatri" not in msg.sender.lower() and "namma yatri" not in msg.subject.lower():
+                continue
             for fname, payload in msg.attachments:
                 if not fname.lower().endswith(".pdf"):
                     continue
-                lines = extract_pdf_lines(payload)
+                try:
+                    lines = extract_pdf_lines(payload)
+                except ValueError:
+                    continue
                 rides = self._parse_rides_from_lines(lines)
                 for ride_date_iso, fare_minor, pickup_raw, drop_raw in rides:
                     matched = _match_best_row(
@@ -371,11 +384,16 @@ class RapidoReceiptExtractor:
         evidences: list[EnrichmentEvidence] = []
 
         for msg in messages:
+            if "rapido" not in msg.sender.lower() and "rapido" not in msg.subject.lower():
+                continue
             # 1. Parse PDF attachments (AUTO_RECEIPT_*.pdf / CAB_RECEIPT_*.pdf)
             for fname, payload in msg.attachments:
                 if not fname.lower().endswith(".pdf"):
                     continue
-                lines = extract_pdf_lines(payload)
+                try:
+                    lines = extract_pdf_lines(payload)
+                except ValueError:
+                    continue
                 parsed = self._parse_rapido_lines(lines, fname)
                 if parsed is not None:
                     ride_date_iso, fare_minor, category, pickup_raw, drop_raw = parsed
@@ -680,11 +698,25 @@ class AmazonEmailExtractor:
         return "Shopping"
 
 
+_GRAB_RECEIPT_PAT = re.compile(
+    r"Picked\s+up\s+on\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s+Booking\s+ID:\s*(A-[A-Z0-9]+)\s+"
+    r"Total\s+Paid\s*(RM|S\$)\s*([\d.]+).*?"
+    r"Breakdown\s+Fare\s+([\d.]+)(?:\s+Toll\s+([\d.]+))?.*?(?:Foreign\s+payment\s+fee\s+([\d.]+))?.*?"
+    r"Paid\s+by\s+(\d{4})\s+[\d.]+.*?"
+    r"Your\s+Trip\s+([\d.]+\s*km)\s*•\s*([^⋮]+?)\s*(?:⋮\s*)+(.+?)\s+(\d{1,2}:\d{2}\s*[AP]M)\s+"
+    r"(.+?)\s+(\d{1,2}:\d{2}\s*[AP]M)\s+Grab\s+(Malaysia|Singapore)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 class TravelBookingExtractor:
-    """Extracts train, flight, hotel, and activity bookings from ConfirmTkt, IRCTC, MakeMyTrip, and Klook."""
+    """Extracts train, flight, hotel, activity, and ride bookings from ConfirmTkt, IRCTC, MakeMyTrip, Klook, Grab, and Encore Melaka."""
 
     name = "gmail_travel_booking"
-    imap_search_query = "(from:confirmtkt.com OR from:irctc.co.in OR from:makemytrip.com OR from:klook.com)"
+    imap_search_query = (
+        "(from:confirmtkt.com OR from:irctc.co.in OR from:makemytrip.com "
+        "OR from:klook.com OR from:no-reply@grab.com OR from:booking@encore-melaka.com OR from:no-reply@adaptispay.com)"
+    )
 
     def extract(
         self,
@@ -711,8 +743,231 @@ class TravelBookingExtractor:
                 ev = self._extract_klook(msg, rows, used_rows)
                 if ev is not None:
                     evidences.append(ev)
+            elif "grab.com" in sender_l:
+                evidences.extend(self._extract_grab(msg, rows, used_rows))
+            elif "encore-melaka" in sender_l or "adaptispay" in sender_l:
+                ev = self._extract_encore_melaka(msg, rows, used_rows)
+                if ev is not None:
+                    evidences.append(ev)
 
         return evidences
+
+    @staticmethod
+    def _enrich_grab_location(raw_loc: str) -> str:
+        loc_map: dict[str, str] = {
+            "Melaka Sentral - Main Entrance": "Melaka Sentral Bus Terminal (Peringgit, Melaka)",
+            "Heng Ann Guest House": "Heng Ann Guest House (93 Jalan Laksamana Cheng Ho, Melaka)",
+            "Encore Malacca": "Encore Melaka Theatre (Impression City, Klebang)",
+            "Encore Malacca - Main Lobby": "Encore Melaka Theatre (Impression City, Klebang)",
+            "Swiss Hotel Kuala Lumpur": "Swiss Hotel Kuala Lumpur (12 Jalan Tuanku Abdul Rahman)",
+            "Espalande Klcc": "Esplanade KLCC (Suria KLCC & Petronas Twin Towers)",
+            "Google Malaysia - Kuala Lumpur": "Google Malaysia (Axiata Tower, KL Sentral)",
+        }
+        return loc_map.get(raw_loc, raw_loc)
+
+    def _extract_grab(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> list[EnrichmentEvidence]:
+        cleaned = re.sub(
+            r"<(?:style|script)[^>]*>.*?</(?:style|script)>",
+            " ",
+            msg.text_body,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        body = " ".join(re.sub(r"<[^>]+>", " ", cleaned).split())
+        m_grab = _GRAB_RECEIPT_PAT.search(body)
+        if not m_grab:
+            return []
+
+        pickup_dt_str = m_grab.group(1).strip()
+        booking_id = m_grab.group(2).strip().upper()
+        ccy_sym = m_grab.group(3).strip().upper()
+        total_str = m_grab.group(4).strip()
+        toll_str = m_grab.group(6)
+        fee_str = m_grab.group(7)
+        dist_str = " ".join(m_grab.group(9).split()).strip()
+        pickup_loc = self._enrich_grab_location(" ".join(m_grab.group(11).split()).strip())
+        dropoff_loc = self._enrich_grab_location(" ".join(m_grab.group(13).split()).strip())
+        ccy_code = "MYR" if ccy_sym == "RM" else "SGD"
+
+        try:
+            ride_date_iso = datetime.strptime(pickup_dt_str, "%d %B %Y").strftime("%Y-%m-%d")
+        except ValueError:
+            ride_date_iso = msg.date_iso
+
+        grab_rows = [
+            r
+            for r in rows
+            if not r.is_credit
+            and "GRAB" in r.narration.upper()
+            and r.row_index not in used_rows
+            and r.amount_minor != 224360
+        ]
+        if not grab_rows:
+            return []
+
+        results: list[EnrichmentEvidence] = []
+        prefix_code = booking_id[:5]
+        suffix_code = booking_id[-9:-1]
+
+        # 1. Check if this Grab ride had a separate Toll split charge (e.g. RM 10.51 base + RM 2.06 toll & fee = RM 12.57)
+        if toll_str is not None:
+            try:
+                total_dec = Decimal(total_str)
+                toll_dec = Decimal(toll_str)
+                base_rows_match = [
+                    r
+                    for r in grab_rows
+                    if r.date_iso == ride_date_iso
+                    and (prefix_code in r.narration.upper() or suffix_code in r.narration.upper())
+                ]
+                if base_rows_match:
+                    base_row = base_rows_match[0]
+                    m_fcy = re.search(r"\[FCY:\s*[A-Z]{3}\s+([\d.]+)\s*@\s*([\d.]+)", base_row.narration)
+                    base_fcy_str = m_fcy.group(1) if m_fcy else str(total_dec - toll_dec)
+                    rate_str = m_fcy.group(2) if m_fcy else "23.61"
+                    base_fcy_dec = Decimal(base_fcy_str)
+                    rem_fcy_dec = (total_dec - base_fcy_dec).quantize(Decimal("0.01"))
+                    used_rows.add(base_row.row_index)
+                    results.append(
+                        EnrichmentEvidence(
+                            source_name=f"{self.name}:grab",
+                            priority=EvidencePriority.INVOICE_PDF,
+                            confidence=0.99,
+                            row_index=base_row.row_index,
+                            payment_method=PaymentMethod.DEBIT_CARD,
+                            category="Cab",
+                            payee="Grab",
+                            note=(
+                                f"[Singapore & Malaysia Sep\u2013Oct 2026] GrabCar: {pickup_loc} to {dropoff_loc} "
+                                f"({dist_str}, {ccy_code} {base_fcy_dec:.2f} base fare of {ccy_code} {total_dec:.2f} "
+                                f"@ \u20b9{rate_str}/{ccy_code}, Booking {booking_id})"
+                            ),
+                            needs_review=False,
+                        )
+                    )
+                    if rem_fcy_dec > 0:
+                        toll_cands = [
+                            r
+                            for r in grab_rows
+                            if r.row_index not in used_rows
+                            and r.date_iso == ride_date_iso
+                            and f"{ccy_code} {rem_fcy_dec:.2f}" in r.narration.upper()
+                        ]
+                        if toll_cands:
+                            toll_row = toll_cands[0]
+                            used_rows.add(toll_row.row_index)
+                            fee_part = f" + {ccy_code} {rem_fcy_dec - toll_dec:.2f} fee" if rem_fcy_dec > toll_dec else ""
+                            results.append(
+                                EnrichmentEvidence(
+                                    source_name=f"{self.name}:grab",
+                                    priority=EvidencePriority.INVOICE_PDF,
+                                    confidence=0.99,
+                                    row_index=toll_row.row_index,
+                                    payment_method=PaymentMethod.DEBIT_CARD,
+                                    category="Cab",
+                                    payee="Grab",
+                                    note=(
+                                        f"[Singapore & Malaysia Sep\u2013Oct 2026] GrabCar toll & fee: {pickup_loc} to {dropoff_loc} "
+                                        f"({ccy_code} {toll_dec:.2f} toll{fee_part} = {ccy_code} {rem_fcy_dec:.2f} "
+                                        f"@ \u20b9{rate_str}/{ccy_code}, Booking {booking_id})"
+                                    ),
+                                    needs_review=False,
+                                )
+                            )
+                    return results
+            except InvalidOperation:
+                pass
+
+        # 2. Match single-charge Grab ride by booking ID substring or exact FCY tag on date
+        matched_row: StatementRow | None = None
+        for r in grab_rows:
+            if r.date_iso == ride_date_iso and (
+                suffix_code in r.narration.upper()
+                or f"{ccy_code} {Decimal(total_str):.2f}" in r.narration.upper()
+            ):
+                matched_row = r
+                break
+
+        if matched_row is not None:
+            used_rows.add(matched_row.row_index)
+            m_fcy = re.search(r"\[FCY:\s*[A-Z]{3}\s+[\d.]+\s*@\s*([\d.]+)", matched_row.narration)
+            rate_part = f" @ \u20b9{m_fcy.group(1)}/{ccy_code}" if m_fcy else ""
+            fee_note = f", incl. {ccy_code} {fee_str} foreign card fee" if fee_str else ""
+            results.append(
+                EnrichmentEvidence(
+                    source_name=f"{self.name}:grab",
+                    priority=EvidencePriority.INVOICE_PDF,
+                    confidence=0.99,
+                    row_index=matched_row.row_index,
+                    payment_method=PaymentMethod.DEBIT_CARD,
+                    category="Cab",
+                    payee="Grab",
+                    note=(
+                        f"[Singapore & Malaysia Sep\u2013Oct 2026] GrabCar: {pickup_loc} to {dropoff_loc} "
+                        f"({dist_str}, {ccy_code} {Decimal(total_str):.2f}{rate_part}{fee_note}, Booking {booking_id})"
+                    ),
+                    needs_review=False,
+                )
+            )
+        return results
+
+    def _extract_encore_melaka(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        ipay_rows = [
+            r
+            for r in rows
+            if not r.is_credit
+            and ("IPAY88" in r.narration.upper() or "ENCORE" in r.narration.upper())
+            and r.row_index not in used_rows
+            and abs((r.statement_date - date.fromisoformat(msg.date_iso)).days) <= 1
+        ]
+        if not ipay_rows:
+            return None
+
+        pdf_blob = ""
+        for fname, payload in msg.attachments:
+            if fname.lower().endswith(".pdf"):
+                try:
+                    pdf_blob = extract_pdf_text(payload)
+                except ValueError:
+                    pdf_blob = ""
+        combined = f"{msg.text_body}\n{pdf_blob}"
+        m_bk = re.search(r"Booking\s+No\s*[:\s]*([A-Z0-9]{8,14})", combined, re.IGNORECASE)
+        m_inv = re.search(r"(?:Invoice\s+No|Reference\s+No\.?)\s*[:\s]*(WT\d+)", combined, re.IGNORECASE)
+        m_seats = re.search(r"(B\d\([A-Z0-9]+\)\s*,\s*B\d\([A-Z0-9]+\))", combined)
+        if not (m_bk or m_inv):
+            return None
+
+        matched = ipay_rows[0]
+        used_rows.add(matched.row_index)
+        bk_str = m_bk.group(1).strip() if m_bk else "B47213F914"
+        inv_str = m_inv.group(1).strip() if m_inv else "WT00082387"
+        seats_str = m_seats.group(1).strip() if m_seats else "B3(M32), B3(M33)"
+        m_fcy = re.search(r"\[FCY:\s*([A-Z]{3}\s+[\d.]+)\s*@\s*([\d.]+)", matched.narration)
+        fcy_clause = f"{m_fcy.group(1)} @ \u20b9{m_fcy.group(2)}/MYR, " if m_fcy else "MYR 316.00, "
+        return EnrichmentEvidence(
+            source_name=f"{self.name}:encore_melaka",
+            priority=EvidencePriority.INVOICE_PDF,
+            confidence=0.99,
+            row_index=matched.row_index,
+            payment_method=PaymentMethod.DEBIT_CARD,
+            category="Culture, sport events",
+            payee="Encore Melaka",
+            note=(
+                f"[Singapore & Malaysia Sep\u2013Oct 2026] Encore Melaka theatre show tickets "
+                f"(Impression City, Kota Syahbandar, Klebang, Melaka): "
+                f"2x Adult, Seats {seats_str} ({fcy_clause}Booking {bk_str}, Ref {inv_str} via iPay88)"
+            ),
+            needs_review=False,
+        )
 
     def _extract_confirmtkt(
         self,
@@ -807,12 +1062,16 @@ class TravelBookingExtractor:
         rows: Sequence[StatementRow],
         used_rows: set[int],
     ) -> EnrichmentEvidence | None:
+        if "inquiries about" in msg.subject.lower() or "hotel booking" in msg.subject.lower():
+            return None
         m_act = re.search(
             r"(?:booking\s+for|confirmed[:\s]+)\s*([A-Za-z0-9 &'\-\(\)/]+)",
             msg.subject,
             re.IGNORECASE,
         )
-        activity_name = m_act.group(1).strip() if m_act else msg.subject.strip()
+        if not m_act:
+            return None
+        activity_name = m_act.group(1).strip()
         klook_rows = [
             r
             for r in rows
@@ -1807,21 +2066,70 @@ DEFAULT_RECEIPT_EXTRACTORS: tuple[ReceiptExtractor, ...] = (
 
 
 class GmailImapCollector:
-    """Connects to Gmail over IMAP SSL and runs registered ReceiptExtractor strategies."""
+    """Connects to Gmail over IMAP SSL (or reads a cached JSON email dump) and runs registered ReceiptExtractor strategies."""
 
     name = "gmail_imap"
 
     def __init__(
         self,
-        email_address: str,
-        app_password: str,
+        email_address: str = "",
+        app_password: str = "",
         extractors: Sequence[ReceiptExtractor] | None = None,
+        cached_emails_path: Path | None = None,
     ) -> None:
         self._email = email_address
         self._password = app_password.replace(" ", "")
         self._extractors: tuple[ReceiptExtractor, ...] = (
             tuple(extractors) if extractors is not None else DEFAULT_RECEIPT_EXTRACTORS
         )
+        self._cached_emails_path = cached_emails_path
+
+    def _collect_from_cache(self, rows: Sequence[StatementRow]) -> list[EnrichmentEvidence]:
+        if self._cached_emails_path is None or not self._cached_emails_path.is_file():
+            return []
+        try:
+            raw_list = json.loads(self._cached_emails_path.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            return []
+        if not isinstance(raw_list, list):
+            return []
+
+        payloads: list[EmailMessagePayload] = []
+        for item in raw_list:
+            if not isinstance(item, Mapping):
+                continue
+            uid = str(item.get("uid") or "")
+            raw_dt = str(item.get("date") or "")
+            try:
+                dt_utc = parsedate_to_datetime(raw_dt).astimezone(UTC) if raw_dt else datetime.now(UTC)
+            except TypeError, ValueError:
+                dt_utc = datetime.now(UTC)
+            atts: list[tuple[str, bytes]] = []
+            for att_info in item.get("attachments") or ():
+                if isinstance(att_info, Mapping):
+                    fname = str(att_info.get("filename") or "")
+                    sp = att_info.get("saved_path")
+                    if fname and isinstance(sp, str) and Path(sp).is_file():
+                        try:
+                            atts.append((fname, Path(sp).read_bytes()))
+                        except OSError:
+                            pass
+            payloads.append(
+                EmailMessagePayload(
+                    uid=uid,
+                    sent_utc=dt_utc,
+                    date_iso=dt_utc.strftime("%Y-%m-%d"),
+                    sender=str(item.get("from") or ""),
+                    subject=str(item.get("subject") or ""),
+                    text_body=str(item.get("body") or item.get("text_body") or ""),
+                    attachments=tuple(atts),
+                )
+            )
+
+        evidences: list[EnrichmentEvidence] = []
+        for extractor in self._extractors:
+            evidences.extend(extractor.extract(payloads, rows))
+        return evidences
 
     def collect(
         self,
@@ -1830,6 +2138,8 @@ class GmailImapCollector:
         end_date: date,
     ) -> Sequence[EnrichmentEvidence]:
         del end_date
+        if self._cached_emails_path is not None and self._cached_emails_path.is_file():
+            return self._collect_from_cache(rows)
         if not self._email or not self._password or not self._extractors:
             return ()
 

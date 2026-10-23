@@ -108,6 +108,8 @@ class EnrichmentEvidence:
     kind: TransactionKind | None = None
     transfer_account: str | None = None
     payment_method: PaymentMethod | None = None
+    foreign_currency: str | None = None
+    foreign_amount_minor: int | None = None
     labels: tuple[str, ...] = ()
     needs_review: bool | None = None
 
@@ -128,6 +130,8 @@ class CanonicalTransaction:
     payee: str
     note: str
     transfer_account: str | None = None
+    foreign_currency: str | None = None
+    foreign_amount_minor: int | None = None
     labels: tuple[str, ...] = ()
     confidence: float = 1.0
     needs_review: bool = False

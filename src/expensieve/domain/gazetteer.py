@@ -116,6 +116,136 @@ DEFAULT_LANDMARKS: tuple[NamedPlace, ...] = (
     ),
     NamedPlace("Dhruvathare (NH75)", GeoPoint(12.9779, 76.8330), "LANDMARK", radius_meters=400.0),
     NamedPlace("Arasikere", GeoPoint(13.3205, 76.2555), "LANDMARK", radius_meters=2000.0),
+    # Singapore & Malaysia Transit Stations & Landmarks (Sep–Oct 2026 Trip)
+    NamedPlace("Changi Airport T1/T2", GeoPoint(1.3593, 103.9903), "LANDMARK", radius_meters=600.0),
+    NamedPlace(
+        "YWCA Fort Canning Lodge (Dhoby Ghaut)",
+        GeoPoint(1.2975, 103.8453),
+        "LANDMARK",
+        radius_meters=350.0,
+    ),
+    NamedPlace("Dhoby Ghaut MRT", GeoPoint(1.2989, 103.8458), "METRO_STATION", radius_meters=350.0),
+    NamedPlace("Chinatown MRT", GeoPoint(1.2843, 103.8433), "METRO_STATION", radius_meters=350.0),
+    NamedPlace("Raffles Place MRT", GeoPoint(1.2827, 103.8519), "METRO_STATION", radius_meters=350.0),
+    NamedPlace(
+        "Lau Pa Sat (18 Raffles Quay)", GeoPoint(1.2806, 103.8504), "LANDMARK", radius_meters=300.0
+    ),
+    NamedPlace(
+        "Bayfront MRT (Marina Bay Sands)", GeoPoint(1.2823, 103.8591), "METRO_STATION", radius_meters=450.0
+    ),
+    NamedPlace("Gardens by the Bay", GeoPoint(1.2792, 103.8645), "LANDMARK", radius_meters=650.0),
+    NamedPlace(
+        "Esplanade Drive (Marina Bay)", GeoPoint(1.2901, 103.8555), "LANDMARK", radius_meters=400.0
+    ),
+    NamedPlace("City Hall / Funan", GeoPoint(1.2925, 103.8500), "LANDMARK", radius_meters=350.0),
+    NamedPlace(
+        "Science Centre Singapore (Jurong East)",
+        GeoPoint(1.3337, 103.7363),
+        "LANDMARK",
+        radius_meters=500.0,
+    ),
+    NamedPlace(
+        "VivoCity / HarbourFront MRT", GeoPoint(1.2651, 103.8222), "METRO_STATION", radius_meters=450.0
+    ),
+    NamedPlace(
+        "Resorts World Sentosa (Universal Studios & Oceanarium)",
+        GeoPoint(1.2562, 103.8215),
+        "LANDMARK",
+        radius_meters=550.0,
+    ),
+    NamedPlace(
+        "Siloso Beach (Wings of Time), Sentosa",
+        GeoPoint(1.2515, 103.8175),
+        "LANDMARK",
+        radius_meters=400.0,
+    ),
+    NamedPlace("Google Singapore (Mapletree Business City, Pasir Panjang)", GeoPoint(1.2756, 103.8000), "LANDMARK", radius_meters=450.0),
+    NamedPlace("Labrador Park MRT", GeoPoint(1.2723, 103.8028), "METRO_STATION", radius_meters=350.0),
+    NamedPlace("Buona Vista MRT", GeoPoint(1.3068, 103.7905), "METRO_STATION", radius_meters=350.0),
+    NamedPlace("Kranji MRT", GeoPoint(1.4252, 103.7618), "METRO_STATION", radius_meters=350.0),
+    NamedPlace("Woodlands Checkpoint", GeoPoint(1.4460, 103.7685), "LANDMARK", radius_meters=450.0),
+    NamedPlace("Marine Parade MRT (i12 Katong)", GeoPoint(1.3043, 103.9060), "METRO_STATION", radius_meters=400.0),
+    NamedPlace(
+        "Betel Box Hostel (Joo Chiat Road)", GeoPoint(1.3122, 103.9002), "LANDMARK", radius_meters=350.0
+    ),
+    NamedPlace("Joo Chiat Complex (Geylang Serai)", GeoPoint(1.3162, 103.8982), "LANDMARK", radius_meters=350.0),
+    NamedPlace("JB Sentral CIQ (Bukit Chagar)", GeoPoint(1.4645, 103.7655), "LANDMARK", radius_meters=500.0),
+    NamedPlace(
+        "Larkin Sentral Bus Terminal (Johor Bahru)",
+        GeoPoint(1.4956, 103.7418),
+        "LANDMARK",
+        radius_meters=500.0,
+    ),
+    NamedPlace("Melaka Sentral Bus Terminal", GeoPoint(2.2208, 102.2500), "LANDMARK", radius_meters=500.0),
+    NamedPlace(
+        "Heng Ann Guest House (93 Jalan Laksamana Cheng Ho, Melaka)",
+        GeoPoint(2.1950, 102.2591),
+        "LANDMARK",
+        radius_meters=350.0,
+    ),
+    NamedPlace(
+        "Encore Melaka Theatre (Impression City, Klebang)",
+        GeoPoint(2.1882, 102.2200),
+        "LANDMARK",
+        radius_meters=600.0,
+    ),
+    NamedPlace(
+        "Jonker Walk & Dutch Square (Stadhuys, Bandar Hilir, Melaka)",
+        GeoPoint(2.1955, 102.2495),
+        "LANDMARK",
+        radius_meters=450.0,
+    ),
+    NamedPlace(
+        "Terminal Bersepadu Selatan (TBS / Bandar Tasik Selatan LRT)",
+        GeoPoint(3.0765, 101.7112),
+        "METRO_STATION",
+        radius_meters=500.0,
+    ),
+    NamedPlace("Masjid Jamek LRT", GeoPoint(3.1495, 101.6964), "METRO_STATION", radius_meters=300.0),
+    NamedPlace(
+        "Swiss Hotel Kuala Lumpur (12 Jalan Tuanku Abdul Rahman)",
+        GeoPoint(3.1515, 101.6953),
+        "LANDMARK",
+        radius_meters=250.0,
+    ),
+    NamedPlace(
+        "Jalan Masjid India (Little India, Kuala Lumpur)",
+        GeoPoint(3.1520, 101.6968),
+        "LANDMARK",
+        radius_meters=250.0,
+    ),
+    NamedPlace("Bank Negara KTM Station", GeoPoint(3.1545, 101.6928), "METRO_STATION", radius_meters=350.0),
+    NamedPlace("Batu Caves KTM & Temple Complex", GeoPoint(3.2377, 101.6815), "LANDMARK", radius_meters=500.0),
+    NamedPlace("Kuala Lumpur KTM Station", GeoPoint(3.1395, 101.6936), "METRO_STATION", radius_meters=350.0),
+    NamedPlace(
+        "Planetarium Negara (Perdana Botanical Gardens, KL)",
+        GeoPoint(3.1395, 101.6887),
+        "LANDMARK",
+        radius_meters=400.0,
+    ),
+    NamedPlace("Central Market (Pasar Seni, Jalan Hang Kasturi)", GeoPoint(3.1462, 101.6957), "LANDMARK", radius_meters=300.0),
+    NamedPlace("Medan Pasar (Old Market Square, KL)", GeoPoint(3.1485, 101.6962), "LANDMARK", radius_meters=250.0),
+    NamedPlace("Suria KLCC & Petronas Twin Towers", GeoPoint(3.1573, 101.7122), "LANDMARK", radius_meters=450.0),
+    NamedPlace("Medan Tuanku Monorail (Chow Kit, KL)", GeoPoint(3.1590, 101.6975), "METRO_STATION", radius_meters=400.0),
+    NamedPlace(
+        "KL Sentral &Axiata Tower (Google Malaysia)",
+        GeoPoint(3.1342, 101.6861),
+        "METRO_STATION",
+        radius_meters=450.0,
+    ),
+    NamedPlace(
+        "Awana SkyCentral & Genting Highlands Premium Outlets",
+        GeoPoint(3.4040, 101.7827),
+        "LANDMARK",
+        radius_meters=600.0,
+    ),
+    NamedPlace(
+        "SkyAvenue Mall, Resorts World Genting",
+        GeoPoint(3.4237, 101.7945),
+        "LANDMARK",
+        radius_meters=600.0,
+    ),
+    NamedPlace("KLIA Terminal 1 (Sepang)", GeoPoint(2.7485, 101.7045), "LANDMARK", radius_meters=1200.0),
 )
 
 

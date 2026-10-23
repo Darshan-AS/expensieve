@@ -274,6 +274,16 @@ model {{
           sources 'Local PDF file/directory or Gmail IMAP (Emailstatements.cards@hdfcbank.net)'
         }}
       }}
+
+      component dcbNiyoSource 'DcbNiyoStatementSource' {{
+        #spine
+        description 'Decrypts AES-128-CBC DCB Bank Niyo Global PDF statements, chains post-statement email alerts by available balance, and infers zero-markup Visa SGD/MYR spend'
+        technology 'AES-128-CBC PDF Decryptor • Balance Chainer • Forex Inferencer'
+        metadata {{
+          supported_formats '.pdf, dcb_emails.json (DCB Bank Niyo Global)'
+          sources 'Local PDF/JSON or Gmail IMAP (bankstatement@dcb.bank.in, alerts@dcb.bank.in)'
+        }}
+      }}
     }}
 
     layer collectorAdapters 'Evidence Collector Adapters (expensieve.adapters.collectors)' {{
@@ -325,12 +335,12 @@ model {{
           technology 'imaplib + email.message'
         }}
 
-        extractor pdfTextEngine 'Pure-Python RC4 & 2D PDF Layout Engine (pdf_text)' {{
+        extractor pdfTextEngine 'Pure-Python RC4/AES & 2D PDF Layout Engine (pdf_text)' {{
           #extractorTag
-          description 'Decrypts RC4-128 Standard Security streams, decompresses FlateDecode, parses /ToUnicode CMaps, and sorts blocks by 2D (page, Y, X) coordinates'
-          technology 'RC4 + MD5 + zlib + /ToUnicode CMap (Zero C Deps)'
+          description 'Decrypts RC4-128 & AES-128-CBC Standard Security streams, decompresses FlateDecode, parses /ToUnicode CMaps, and sorts blocks by 2D (page, Y, X) coordinates'
+          technology 'RC4 + AES-128-CBC + MD5 + zlib + /ToUnicode CMap (Zero C Deps)'
           metadata {{
-            encryption 'PDF Standard Security Handler V1/V2 R2/R3 (RC4-128)'
+            encryption 'PDF Standard Security Handler V1/V2/V4 R2/R3/R4 (RC4-128 & AESV2)'
             stream_codec 'FlateDecode (zlib)'
             glyph_mapping 'beginbfchar & beginbfrange UTF-16BE'
             layout_sorting '2D Coordinate Clustering (page, -Y, X)'
@@ -363,8 +373,8 @@ model {{
 
         extractor travelExtractor 'TravelBookingExtractor' {{
           #extractorTag
-          description 'Extracts ConfirmTkt/IRCTC train routes, coach class, and PNRs plus MakeMyTrip hotel bookings'
-          technology 'ConfirmTkt • IRCTC • MakeMyTrip'
+          description 'Extracts ConfirmTkt/IRCTC train routes & PNRs, MakeMyTrip hotel bookings, Grab ride receipts (MYR/SGD), and Encore Melaka show PDFs'
+          technology 'ConfirmTkt • IRCTC • MakeMyTrip • Grab • Encore Melaka'
         }}
 
         extractor investmentExtractor 'InvestmentEmailExtractor' {{
@@ -411,6 +421,7 @@ model {{
   expensieve.serviceLayer.syncPipeline -> expensieve.portsLayer.protocols 'Depends exclusively on PEP 544 structural Protocols'
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcSource '1a. Parses new bank StatementRows after cutoff RRN'
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcCcPdfSource '1b. Decrypts & parses HDFC Credit Card PDF StatementRows'
+  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.dcbNiyoSource '1c. Decrypts DCB Niyo PDF & chains post-statement alerts'
   expensieve.serviceLayer.syncPipeline -> expensieve.domainLayer.declarativeRules '2a. Collects baseline rule & UPI remark evidence (Priority {p_rule}..{p_rem})'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.adbSmsCollector '2b. Collects exact UTC timestamps by 12-digit RRN (Priority {p_rule})'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.timelineGeoCollector '2c. Collects Metro/Auto/QR route & venue evidence (Priority {p_geo})'
@@ -430,6 +441,9 @@ model {{
   expensieve.statementAdapters.hdfcCcPdfSource -> gmail_imap 'Fetches encrypted monthly Credit Card PDFs'
   expensieve.statementAdapters.hdfcCcPdfSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts RC4-128 streams & extracts 2D table rows'
   expensieve.statementAdapters.hdfcCcPdfSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine'
+  expensieve.statementAdapters.dcbNiyoSource -> gmail_imap 'Fetches encrypted DCB Bank PDFs & real-time transaction alerts'
+  expensieve.statementAdapters.dcbNiyoSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts AES-128-CBC streams & extracts 2D table rows'
+  expensieve.statementAdapters.dcbNiyoSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine with inferred SGD/MYR forex'
 
   // Collectors & External Systems
   expensieve.collectorAdapters.adbSmsCollector -> pixel_phone 'Queries content://sms/inbox over ADB'

@@ -19,7 +19,11 @@ from expensieve.adapters.collectors.gmail_imap import (
     SwiggyReceiptExtractor,
     TravelBookingExtractor,
 )
-from expensieve.adapters.collectors.pdf_text import rc4_crypt
+from expensieve.adapters.collectors.pdf_text import aes128_cbc_decrypt, rc4_crypt
+from expensieve.adapters.statements.dcb_niyo import (
+    DcbNiyoStatementSource,
+    infer_dcb_forex_details,
+)
 from expensieve.adapters.statements.hdfc_cc_pdf import (
     HdfcCreditCardPdfStatementSource,
     parse_hdfc_cc_pdf_bytes,
@@ -740,6 +744,122 @@ class TestHdfcCreditCardPdfAndAlerts(unittest.TestCase):
         )
         self.assertIsNotNone(CanonicalTransaction)
         self.assertIsNotNone(DebtLinkGroup)
+
+
+class TestDcbNiyoGlobalAndAesPdf(unittest.TestCase):
+    def test_aes128_cbc_decrypt_nist_vector(self) -> None:
+        # NIST FIPS-197 Appendix B test vector with custom IV and PKCS#7 padding
+        key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+        c1 = bytes.fromhex("3925841d02dc09fbdc118597196a0b32")
+        p_raw = bytes.fromhex("3243f6a8885a308d313198a2e0370734")
+        iv_custom = bytes(p_raw[i] ^ (0x01 if i == 15 else 0x41) for i in range(16))
+        dec = aes128_cbc_decrypt(key, iv_custom + c1)
+        self.assertEqual(dec, b"A" * 15)
+        self.assertEqual(aes128_cbc_decrypt(key, b""), b"")
+
+    def test_dcb_forex_inference_and_alert_chaining(self) -> None:
+        from decimal import Decimal
+
+        fcy_sg = infer_dcb_forex_details(
+            "2026-09-28",
+            "POS VS/627112161445/17:35:20/HELLORIDE_S SINGAPORE/",
+            7521,
+        )
+        self.assertEqual(fcy_sg, ("SGD", Decimal("1.00"), Decimal("75.2100")))
+
+        fcy_my = infer_dcb_forex_details(
+            "2026-10-04",
+            "POS VS/627709172706/12:22:27/PLANETARIUM NEGARA /",
+            56671,
+        )
+        self.assertEqual(fcy_my, ("MYR", Decimal("24.00"), Decimal("23.6129")))
+
+        alerts = [
+            {
+                "uid": "1",
+                "subject": "Transaction alert across your DCB Bank Account",
+                "from": "DCB Bank <alerts@dcb.bank.in>",
+                "date": "Fri, 25 Sep 2026 11:48:23 +0530",
+                "body": (
+                    "Dear Customer, Your DCB Savings Account XXXXXXXX006002 is credited by INR 106,000.00 "
+                    "on 25-09-2026 11:48:14 AM IST on account of inward fund transfer. "
+                    "Available Bal is INR 106,000.00."
+                ),
+            },
+            {
+                "uid": "2",
+                "subject": "DCB Bank Global Niyo Card Transaction Alert",
+                "from": "DCB Bank <alerts@dcb.bank.in>",
+                "date": "Fri, 02 Oct 2026 10:35:30 +0530",
+                "body": (
+                    "Dear Customer, Your DCB Bank Debit Card No. 4214XXXXXX1060 was debited with INR 7,465.28 "
+                    "on 02-10-2026 10:35:24 AM at VS/627505209551/10:35:24/IPAY88*ECOM /. "
+                    "Available Bal is INR 98,534.72."
+                ),
+            },
+            {
+                "uid": "3",
+                "subject": "OTP for your DCB Bank Debit Card ending 1060",
+                "from": "DCB Bank <alerts@dcbbank.com>",
+                "date": "Fri, 02 Oct 2026 10:35:00 +0530",
+                "body": (
+                    "123456 is the OTP for your transaction of MYR 316.00 at IPAY88 (M) SDN BHD "
+                    "dated 02-Oct-2026 10:34:55 on DCB Debit Card."
+                ),
+            },
+        ]
+        source = DcbNiyoStatementSource(alert_dicts=alerts, account_name="NiyoX")
+        rows = list(source.parse())
+        self.assertEqual(len(rows), 2)
+        self.assertIn("[OTP: MYR 316.00 at IPAY88 (M) SDN BHD]", rows[1].narration)
+        self.assertIn("[FCY: MYR 316.00 @ 23.62 INR/MYR]", rows[1].narration)
+
+        # Verify Grab & Encore Melaka receipt extractors and DeclarativeRuleCollector
+        grab_row_1 = _make_row(
+            row_index=36,
+            date_iso="2026-10-03",
+            narration="POS VS/627603847709/08:49:20/GRAB* A-9TK9G3LWWA2/ [FCY: MYR 10.51 @ 23.61 INR/MYR]",
+            debit_minor=24817,
+            ref="627603847709",
+        )
+        grab_row_2 = _make_row(
+            row_index=37,
+            date_iso="2026-10-03",
+            narration="POS VS/627603883180/09:14:49/GRAB.COM / [FCY: MYR 2.06 @ 23.61 INR/MYR]",
+            debit_minor=4864,
+            ref="627603883180",
+        )
+        grab_msg = EmailMessagePayload(
+            uid="86839",
+            sent_utc=datetime(2026, 10, 3, 1, 14, 52, tzinfo=UTC),
+            date_iso="2026-10-03",
+            sender="Grab <no-reply@grab.com>",
+            subject="Your Grab E-Receipt",
+            text_body=(
+                "JustGrab Hope you enjoyed your ride! Picked up on 03 October 2026 "
+                "Booking ID: A-9TK9G3LWWA24AV Total Paid RM 12.57 "
+                "Breakdown Fare 10.20 Toll 2.00 Foreign payment fee 0.37 Paid by 1060 12.57 "
+                "Your Trip 5.22 km • 17 mins ⋮ ⋮ "
+                "Heng Ann Guest House 08:49 AM Melaka Sentral - Main Entrance 09:06 AM Grab Malaysia"
+            ),
+            attachments=(),
+        )
+        travel_ext = TravelBookingExtractor()
+        g_evs = travel_ext.extract([grab_msg], [grab_row_1, grab_row_2])
+        self.assertEqual(len(g_evs), 2)
+        self.assertIn("MYR 10.51 base fare of MYR 12.57", g_evs[0].note or "")
+        self.assertIn("MYR 2.00 toll + MYR 0.06 fee = MYR 2.06", g_evs[1].note or "")
+
+        from expensieve.services.evidence_merger import EvidenceMerger
+
+        merged_grab = EvidenceMerger(account_name="NiyoX Forex").merge([grab_row_1, grab_row_2], g_evs)
+        self.assertEqual(merged_grab[0].account_name, "NiyoX Forex")
+        self.assertEqual(merged_grab[0].foreign_currency, "MYR")
+        self.assertEqual(merged_grab[0].foreign_amount_minor, 1051)
+        self.assertEqual(merged_grab[0].amount_minor, 24817)
+        self.assertEqual(merged_grab[1].foreign_currency, "MYR")
+        self.assertEqual(merged_grab[1].foreign_amount_minor, 206)
+        self.assertEqual(merged_grab[1].amount_minor, 4864)
 
 
 if __name__ == "__main__":

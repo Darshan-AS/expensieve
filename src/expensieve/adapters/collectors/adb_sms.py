@@ -163,7 +163,12 @@ class AdbSmsCollector:
                     a for a in alerts if a.amount_minor == row.amount_minor and a.date_iso == row.date_iso
                 ]
                 if len(candidates) == 1:
-                    matched = candidates[0]
+                    cand = candidates[0]
+                    # Only apply fallback timestamp if sender matches account or no POS timestamp exists
+                    is_pos_narr = "POS VS/" in row.narration.upper()
+                    is_dcb_sms = "DCBANK" in cand.address.upper() or "DCB" in cand.body.upper()
+                    if not is_pos_narr or is_dcb_sms:
+                        matched = cand
 
             if matched is not None:
                 evidences.append(

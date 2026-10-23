@@ -15,6 +15,10 @@ from expensieve.adapters.collectors.gmail_imap import GmailImapCollector
 from expensieve.adapters.collectors.timeline_geo import TimelineGeoCollector
 from expensieve.adapters.geocoding.nominatim_cache import CachedNominatimGeocoder
 from expensieve.adapters.sinks.sourdough_sink import SourdoughLedgerSink
+from expensieve.adapters.statements.dcb_niyo import (
+    DEFAULT_DCB_PDF_PASSWORDS,
+    DcbNiyoStatementSource,
+)
 from expensieve.adapters.statements.hdfc_cc_pdf import (
     DEFAULT_CC_PDF_PASSWORDS,
     HdfcCreditCardPdfStatementSource,
@@ -82,16 +86,27 @@ def sync_command(
             help="Fetch monthly HDFC Credit Card statement PDFs directly from Gmail IMAP.",
         ),
     ] = False,
+    fetch_niyo_gmail: Annotated[
+        bool,
+        typer.Option(
+            "--fetch-niyo-gmail",
+            help="Fetch DCB Bank Niyo Global statement PDFs and real-time email alerts directly from Gmail IMAP.",
+        ),
+    ] = False,
     pdf_password: Annotated[
         list[str] | None,
         typer.Option(
             "--pdf-password",
-            help="Password(s) for decrypting PDF statements (defaults to DARS3835, DARS5631, 128789591).",
+            help="Password(s) for decrypting PDF statements (defaults to HDFC CC + DCB Niyo passwords).",
         ),
     ] = None,
     sms_cache: Annotated[
         Path | None,
         typer.Option("--sms-cache", help="Optional path to cached SMS dump file."),
+    ] = None,
+    gmail_cache: Annotated[
+        Path | None,
+        typer.Option("--gmail-cache", help="Optional path to cached Gmail IMAP emails JSON file."),
     ] = None,
     timeline: Annotated[
         Path | None,
@@ -154,9 +169,27 @@ def sync_command(
         gmail_user = gmail_user or disc_user
         gmail_app_password = gmail_app_password or disc_pwd
 
-    passwords = tuple(pdf_password) if pdf_password else DEFAULT_CC_PDF_PASSWORDS
+    passwords = (
+        tuple(pdf_password)
+        if pdf_password
+        else (*DEFAULT_CC_PDF_PASSWORDS, *DEFAULT_DCB_PDF_PASSWORDS)
+    )
+    is_niyo_account = account.upper().startswith("NIYO") or "DCB" in account.upper()
     source: StatementSource
-    if fetch_cc_gmail:
+    if fetch_niyo_gmail:
+        if not gmail_user or not gmail_app_password:
+            raise typer.BadParameter(
+                "--fetch-niyo-gmail requires Gmail credentials via --gmail-user/--gmail-app-password or .wallet_state.json."
+            )
+        target_acc = "NiyoX Forex" if account == "HDFC" else account
+        source = DcbNiyoStatementSource.from_gmail_imap(
+            email_address=gmail_user,
+            app_password=gmail_app_password,
+            account_name=target_acc,
+            cutoff_ref=cutoff_ref,
+            passwords=passwords,
+        )
+    elif fetch_cc_gmail:
         if not gmail_user or not gmail_app_password:
             raise typer.BadParameter(
                 "--fetch-cc-gmail requires Gmail credentials via --gmail-user/--gmail-app-password or .wallet_state.json."
@@ -170,7 +203,22 @@ def sync_command(
             passwords=passwords,
         )
     elif statement is not None:
-        if statement.is_dir() or statement.suffix.lower() == ".pdf":
+        stmt_name_lower = statement.name.lower()
+        is_dcb_stmt = (
+            is_niyo_account
+            or "dcb" in stmt_name_lower
+            or "niyo" in stmt_name_lower
+            or "5157" in stmt_name_lower
+        )
+        if is_dcb_stmt:
+            target_acc = "NiyoX Forex" if account == "HDFC" else account
+            source = DcbNiyoStatementSource(
+                path=statement,
+                account_name=target_acc,
+                cutoff_ref=cutoff_ref,
+                passwords=passwords,
+            )
+        elif statement.is_dir() or statement.suffix.lower() == ".pdf":
             target_acc = "HDFC Credit Card" if account == "HDFC" else account
             source = HdfcCreditCardPdfStatementSource(
                 path=statement,
@@ -185,9 +233,15 @@ def sync_command(
                 cutoff_ref=cutoff_ref,
             )
     else:
-        raise typer.BadParameter("Provide --statement <path> or --fetch-cc-gmail.")
+        raise typer.BadParameter("Provide --statement <path>, --fetch-cc-gmail, or --fetch-niyo-gmail.")
     rows = source.parse()
-    collectors: list[EvidenceCollector] = [DeclarativeRuleCollector()]
+    rule_collector = DeclarativeRuleCollector()
+    rule_evs = (
+        rule_collector.collect(rows, rows[0].statement_date, rows[-1].statement_date)
+        if rows
+        else ()
+    )
+    collectors: list[EvidenceCollector] = [rule_collector]
 
     sms_collector = AdbSmsCollector(cached_sms_path=sms_cache)
     sms_evs = (
@@ -202,7 +256,7 @@ def sync_command(
 
     row_ts_map = {
         ev.row_index: ev.timestamp_iso
-        for ev in sms_evs
+        for ev in (*rule_evs, *sms_evs)
         if ev.row_index is not None and ev.timestamp_iso is not None
     }
     collectors.append(sms_collector)
@@ -230,11 +284,12 @@ def sync_command(
             )
         )
 
-    if gmail_user and gmail_app_password:
+    if (gmail_user and gmail_app_password) or gmail_cache is not None:
         collectors.append(
             GmailImapCollector(
-                email_address=gmail_user,
-                app_password=gmail_app_password,
+                email_address=gmail_user or "",
+                app_password=gmail_app_password or "",
+                cached_emails_path=gmail_cache,
             )
         )
 
