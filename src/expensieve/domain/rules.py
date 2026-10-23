@@ -682,6 +682,80 @@ class DeclarativeRuleCollector:
                 needs_review=False,
             )
 
+        if "211214355640" in narr_u or ("SHIVANANDAAB71@OKSBI" in narr_u and row.amount_minor == 2160000):
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Lending, renting",
+                payee="Veerendra",
+                note="Veerendra \u2192 Me : EMI - 6 months to buy refrigerator",
+                needs_review=False,
+            )
+        if "EPIFI TECHNOLOGIES" in narr_u and "IFN/" in narr_u:
+            ref_suffix = f" (Ref {row.reference_no})" if row.reference_no else ""
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Refunds and Cashbacks",
+                payee="Fi",
+                note=f"Fi reward cashback{ref_suffix}",
+                needs_review=False,
+            )
+        if "SBINT:" in narr_u:
+            m_sb = re.search(r"SBINT:([^\[\]]+)", narr, re.IGNORECASE)
+            sb_period = f" ({m_sb.group(1).strip()})" if m_sb else ""
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Interests, dividends",
+                payee="Fi",
+                note=f"Savings account quarterly interest{sb_period}",
+                needs_review=False,
+            )
+        if "ANNUAL MAINTENANCE CHARGE (AMC)" in narr_u and "FI-FEDERAL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.99,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.DEBIT_CARD,
+                category="Charges, fees",
+                payee="Fi",
+                note="Fi-Federal Visa debit card annual maintenance charge (AMC \u20b9199 + 18% GST)",
+                needs_review=False,
+            )
+        if "UPI IN/SHIVANANDA A B/55550100108172" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                timestamp_iso=pos_ts_utc,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Lending, renting",
+                payee="Dad",
+                note='Dad \u2192 Me : Sony Bravia 9 75" TV (1/3)',
+                needs_review=False,
+            )
+
         if "UPI:REC:" in narr_u or "IMPS:REC:" in narr_u:
             mode = "UPI" if "UPI:REC:" in narr_u else "IMPS"
             ref_part = f" (Ref {row.rrn_12})" if row.rrn_12 else ""

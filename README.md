@@ -30,7 +30,9 @@ expensieve/
 │   │   └── protocols.py           # Structural PEP 544 interfaces (StatementSource, EvidenceCollector, ReverseGeocoder, LedgerSink)
 │   ├── adapters/
 │   │   ├── statements/
-│   │   │   └── hdfc_delimited.py  # Multiline HDFC .txt/.csv parser, UPI narration decomposer & cutoff_ref slicer
+│   │   │   ├── hdfc_delimited.py  # Multiline HDFC .txt/.csv parser, UPI narration decomposer & cutoff_ref slicer
+│   │   │   ├── hdfc_cc_pdf.py     # Encrypted HDFC Credit Card PDF statement parser
+│   │   │   └── fi_federal.py      # Encrypted Fi Money (Federal Bank) savings & FD PDF statement parser
 │   │   ├── collectors/
 │   │   │   ├── adb_sms.py         # Pixel SMS inbox collector (content://sms/inbox -> 12-digit RRN & exact UTC second)
 │   │   │   ├── timeline_geo.py    # Google Maps Timeline.json collector (IN_SUBWAY -> Metro routes, Auto/Cab routes, BharatPe/Vyapar QR venues)

@@ -23,6 +23,10 @@ from expensieve.adapters.statements.equitas_niyo import (
     DEFAULT_EQUITAS_PDF_PASSWORDS,
     EquitasNiyoStatementSource,
 )
+from expensieve.adapters.statements.fi_federal import (
+    DEFAULT_FI_PDF_PASSWORDS,
+    FiFederalStatementSource,
+)
 from expensieve.adapters.statements.hdfc_cc_pdf import (
     DEFAULT_CC_PDF_PASSWORDS,
     HdfcCreditCardPdfStatementSource,
@@ -95,6 +99,13 @@ def sync_command(
         typer.Option(
             "--fetch-niyo-gmail",
             help="Fetch DCB Bank Niyo Global statement PDFs and real-time email alerts directly from Gmail IMAP.",
+        ),
+    ] = False,
+    fetch_fi_gmail: Annotated[
+        bool,
+        typer.Option(
+            "--fetch-fi-gmail",
+            help="Fetch monthly Fi Money / Federal Bank statement PDFs directly from Gmail IMAP.",
         ),
     ] = False,
     pdf_password: Annotated[
@@ -176,11 +187,30 @@ def sync_command(
     passwords = (
         tuple(pdf_password)
         if pdf_password
-        else (*DEFAULT_CC_PDF_PASSWORDS, *DEFAULT_DCB_PDF_PASSWORDS, *DEFAULT_EQUITAS_PDF_PASSWORDS)
+        else (
+            *DEFAULT_CC_PDF_PASSWORDS,
+            *DEFAULT_DCB_PDF_PASSWORDS,
+            *DEFAULT_EQUITAS_PDF_PASSWORDS,
+            *DEFAULT_FI_PDF_PASSWORDS,
+        )
     )
     acc_u = account.upper()
     source: StatementSource
-    if fetch_niyo_gmail:
+    if fetch_fi_gmail:
+        if not gmail_user or not gmail_app_password:
+            raise typer.BadParameter(
+                "--fetch-fi-gmail requires Gmail credentials via --gmail-user/--gmail-app-password or .wallet_state.json."
+            )
+        target_acc = "Fi" if account == "HDFC" else account
+        source = FiFederalStatementSource.from_gmail_imap(
+            email_address=gmail_user,
+            app_password=gmail_app_password,
+            sms_cache_path=sms_cache,
+            account_name=target_acc,
+            cutoff_ref=cutoff_ref,
+            passwords=passwords,
+        )
+    elif fetch_niyo_gmail:
         if not gmail_user or not gmail_app_password:
             raise typer.BadParameter(
                 "--fetch-niyo-gmail requires Gmail credentials via --gmail-user/--gmail-app-password or .wallet_state.json."
@@ -221,6 +251,13 @@ def sync_command(
             or "dcb" in stmt_name_lower
             or "5157" in stmt_name_lower
         )
+        is_fi_stmt = (
+            acc_u == "FI"
+            or "FEDERAL" in acc_u
+            or "fi_attachments" in stmt_name_lower
+            or "fi account statement" in stmt_name_lower
+            or "federal bank" in stmt_name_lower
+        )
         if is_equitas_stmt:
             target_acc = "NiyoX" if account == "HDFC" else account
             source = EquitasNiyoStatementSource(
@@ -232,6 +269,15 @@ def sync_command(
             target_acc = "NiyoX Forex" if account == "HDFC" else account
             source = DcbNiyoStatementSource(
                 path=statement,
+                account_name=target_acc,
+                cutoff_ref=cutoff_ref,
+                passwords=passwords,
+            )
+        elif is_fi_stmt:
+            target_acc = "Fi" if account == "HDFC" else account
+            source = FiFederalStatementSource(
+                path=statement,
+                sms_cache_path=sms_cache,
                 account_name=target_acc,
                 cutoff_ref=cutoff_ref,
                 passwords=passwords,

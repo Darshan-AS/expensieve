@@ -919,6 +919,105 @@ class TestDcbNiyoGlobalAndAesPdf(unittest.TestCase):
         self.assertEqual(rule_evs[3].category, "Interests, dividends")
         self.assertEqual(rule_evs[3].note, "Pro-rata savings interest credited on account closure")
 
+    def test_fi_federal_aes256_sms_and_rules(self) -> None:
+        from datetime import date
+
+        from expensieve.adapters.collectors.pdf_text import aes256_cbc_decrypt
+        from expensieve.adapters.statements.fi_federal import (
+            _extract_fi_reference_no,
+            parse_fi_sms_alerts,
+        )
+        from expensieve.domain.rules import DeclarativeRuleCollector
+
+        # NIST FIPS-197 Appendix C.3 AES-256 single-block vector with zero IV
+        key_256 = bytes.fromhex(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        )
+        ct_256 = bytes.fromhex("8ea2b7ca516745bfeafc49904b496089")
+        pt_256 = bytes.fromhex("00112233445566778899aabbccddeeff")
+        self.assertEqual(
+            aes256_cbc_decrypt(key_256, ct_256, iv_prefix=False, unpad=False),
+            pt_256,
+        )
+
+        self.assertEqual(
+            _extract_fi_reference_no("UPI IN/211214355640/shivanandaab71@oksbi/UPI/0000"),
+            "211214355640",
+        )
+        self.assertEqual(
+            _extract_fi_reference_no("IFN/B2CFri202204220904183ApgS EPIFI TECHNOLOGIES P"),
+            "B2CFri202204220904183ApgS",
+        )
+
+        sample_sms = (
+            "Row: 1 date=1711888257605, address=TX-FIMONY, body=Arasikere, an Annual Maintenance Charge "
+            "(AMC) Rs.235 was deducted from your Federal Bank Savings Account on 2024-03-27 00:00:00\n"
+            "Row: 2 date=1721730220320, address=VM-FedFiB, body=Darshan, you've received INR 1,00,000.00 "
+            "in your Account XXXXXXXX8172. Woohoo! It was sent by SHIVANANDA A B on July 23, 2024. -Federal Bank\n"
+            "Row: 3 date=1727480661363, address=TX-FedFib, body=Great news! We've added INR 737.00 "
+            "as interest to your account XXXXXXXX8172. Date: September 28, 2024 | Check Fi app for details\n"
+        )
+        alerts = parse_fi_sms_alerts(sample_sms)
+        self.assertEqual(len(alerts), 3)
+        self.assertEqual(alerts[0].date_iso, "2024-03-27")
+        self.assertEqual(alerts[0].debit_minor, 23500)
+        self.assertEqual(alerts[1].date_iso, "2024-07-23")
+        self.assertEqual(alerts[1].credit_minor, 10000000)
+        self.assertEqual(alerts[2].date_iso, "2024-09-28")
+        self.assertEqual(alerts[2].credit_minor, 73700)
+
+        fi_rows = [
+            _make_row(
+                1,
+                "2022-04-22",
+                "UPI IN/211214355640/shivanandaab71@oksbi/UPI/0000 [TS: 2022-04-22T09:03:28Z]",
+                credit_minor=2160000,
+                ref="211214355640",
+            ),
+            _make_row(
+                2,
+                "2022-04-22",
+                "IFN/B2CFri202204220904183ApgS EPIFI TECHNOLOGIES P [TS: 2022-04-22T09:04:21Z]",
+                credit_minor=21600,
+                ref="B2CFri202204220904183ApgS",
+            ),
+            _make_row(
+                3,
+                "2024-03-27",
+                "ANNUAL MAINTENANCE CHARGE (AMC) FI-FEDERAL DEBIT CARD [TS: 2024-03-27T06:30:00Z]",
+                debit_minor=23500,
+            ),
+            _make_row(
+                4,
+                "2024-07-23",
+                "UPI IN/SHIVANANDA A B/55550100108172 [TS: 2024-07-23T10:23:40Z]",
+                credit_minor=10000000,
+            ),
+            _make_row(
+                5,
+                "2026-03-28",
+                "SBINT:27-12-2025 to 27-03-2026[55550100108172] [TS: 2026-03-28T00:11:30Z]",
+                credit_minor=79800,
+            ),
+        ]
+        fi_evs = DeclarativeRuleCollector().collect(fi_rows, date(2022, 4, 22), date(2026, 3, 28))
+        self.assertEqual(fi_evs[0].payee, "Veerendra")
+        self.assertEqual(fi_evs[0].category, "Lending, renting")
+        self.assertEqual(fi_evs[1].payee, "Fi")
+        self.assertEqual(fi_evs[1].category, "Refunds and Cashbacks")
+        self.assertEqual(fi_evs[1].note, "Fi reward cashback (Ref B2CFri202204220904183ApgS)")
+        self.assertEqual(fi_evs[2].category, "Charges, fees")
+        self.assertEqual(fi_evs[2].payee, "Fi")
+        self.assertEqual(fi_evs[3].payee, "Dad")
+        self.assertEqual(fi_evs[3].category, "Lending, renting")
+        self.assertEqual(fi_evs[3].note, 'Dad \u2192 Me : Sony Bravia 9 75" TV (1/3)')
+        self.assertEqual(fi_evs[4].category, "Interests, dividends")
+        self.assertEqual(fi_evs[4].payee, "Fi")
+        self.assertEqual(
+            fi_evs[4].note,
+            "Savings account quarterly interest (27-12-2025 to 27-03-2026)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

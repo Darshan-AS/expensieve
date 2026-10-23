@@ -1,4 +1,4 @@
-"""Pure-Python PDF text extractor supporting RC4 and AES-128 (/AESV2) Standard Security decryption, FlateDecode streams, ToUnicode CMaps, and 2D layout sorting."""
+"""Pure-Python PDF text extractor supporting RC4, AES-128 (/AESV2), and AES-256 (/AESV3) Standard Security decryption, FlateDecode streams, ToUnicode CMaps, and 2D layout sorting."""
 
 import hashlib
 import re
@@ -81,6 +81,8 @@ class PdfEncryptInfo:
     key_length_bits: int
     file_id_0: bytes
     is_aes: bool = False
+    user_enc_key: bytes = b""
+    owner_enc_key: bytes = b""
 
 
 def rc4_crypt(key: bytes, data: bytes) -> bytes:
@@ -184,6 +186,104 @@ def aes128_cbc_decrypt(key: bytes, data: bytes) -> bytes:
     return bytes(out)
 
 
+def aes256_cbc_decrypt(
+    key: bytes,
+    data: bytes,
+    *,
+    iv_prefix: bool = True,
+    unpad: bool = True,
+) -> bytes:
+    """Pure-Python AES-256-CBC decryptor for PDF `/AESV3` (`V=5, R=5`) file keys and streams."""
+    if len(key) != 32:
+        return data
+    if iv_prefix:
+        if len(data) < 32 or len(data) % 16 != 0:
+            return data
+        prev = data[:16]
+        start_off = 16
+    else:
+        if len(data) < 16 or len(data) % 16 != 0:
+            return data
+        prev = b"\x00" * 16
+        start_off = 0
+
+    rk = [list(key[i : i + 4]) for i in range(0, 32, 4)]
+    for i in range(8, 60):
+        temp = list(rk[i - 1])
+        if i % 8 == 0:
+            temp = [
+                _AES_SBOX[temp[1]] ^ _AES_RCON[i // 8 - 1],
+                _AES_SBOX[temp[2]],
+                _AES_SBOX[temp[3]],
+                _AES_SBOX[temp[0]],
+            ]
+        elif i % 8 == 4:
+            temp = [_AES_SBOX[b] for b in temp]
+        rk.append([rk[i - 8][j] ^ temp[j] for j in range(4)])
+    round_keys = [[rk[r * 4 + c][r_idx] for c in range(4) for r_idx in range(4)] for r in range(15)]
+
+    out = bytearray()
+    for blk_off in range(start_off, len(data), 16):
+        cur = data[blk_off : blk_off + 16]
+        s = [cur[i] ^ round_keys[14][i] for i in range(16)]
+        for rnd in range(13, 0, -1):
+            s = [
+                _AES_INV_SBOX[s[0]],
+                _AES_INV_SBOX[s[13]],
+                _AES_INV_SBOX[s[10]],
+                _AES_INV_SBOX[s[7]],
+                _AES_INV_SBOX[s[4]],
+                _AES_INV_SBOX[s[1]],
+                _AES_INV_SBOX[s[14]],
+                _AES_INV_SBOX[s[11]],
+                _AES_INV_SBOX[s[8]],
+                _AES_INV_SBOX[s[5]],
+                _AES_INV_SBOX[s[2]],
+                _AES_INV_SBOX[s[15]],
+                _AES_INV_SBOX[s[12]],
+                _AES_INV_SBOX[s[9]],
+                _AES_INV_SBOX[s[6]],
+                _AES_INV_SBOX[s[3]],
+            ]
+            rk_r = round_keys[rnd]
+            s = [s[i] ^ rk_r[i] for i in range(16)]
+            ns = [0] * 16
+            for c in range(4):
+                b0, b1, b2, b3 = s[c * 4], s[c * 4 + 1], s[c * 4 + 2], s[c * 4 + 3]
+                ns[c * 4] = _AES_MUL14[b0] ^ _AES_MUL11[b1] ^ _AES_MUL13[b2] ^ _AES_MUL9[b3]
+                ns[c * 4 + 1] = _AES_MUL9[b0] ^ _AES_MUL14[b1] ^ _AES_MUL11[b2] ^ _AES_MUL13[b3]
+                ns[c * 4 + 2] = _AES_MUL13[b0] ^ _AES_MUL9[b1] ^ _AES_MUL14[b2] ^ _AES_MUL11[b3]
+                ns[c * 4 + 3] = _AES_MUL11[b0] ^ _AES_MUL13[b1] ^ _AES_MUL9[b2] ^ _AES_MUL14[b3]
+            s = ns
+        s = [
+            _AES_INV_SBOX[s[0]],
+            _AES_INV_SBOX[s[13]],
+            _AES_INV_SBOX[s[10]],
+            _AES_INV_SBOX[s[7]],
+            _AES_INV_SBOX[s[4]],
+            _AES_INV_SBOX[s[1]],
+            _AES_INV_SBOX[s[14]],
+            _AES_INV_SBOX[s[11]],
+            _AES_INV_SBOX[s[8]],
+            _AES_INV_SBOX[s[5]],
+            _AES_INV_SBOX[s[2]],
+            _AES_INV_SBOX[s[15]],
+            _AES_INV_SBOX[s[12]],
+            _AES_INV_SBOX[s[9]],
+            _AES_INV_SBOX[s[6]],
+            _AES_INV_SBOX[s[3]],
+        ]
+        rk0 = round_keys[0]
+        for i in range(16):
+            out.append(s[i] ^ rk0[i] ^ prev[i])
+        prev = cur
+    if unpad and out:
+        pad = out[-1]
+        if 1 <= pad <= 16 and all(b == pad for b in out[-pad:]):
+            del out[-pad:]
+    return bytes(out)
+
+
 def _unescape_pdf_literal_bytes(raw: bytes) -> bytes:
     """Unescape a PDF literal string `(...)` byte sequence including octal and backslash escapes."""
     out = bytearray()
@@ -269,7 +369,7 @@ def parse_pdf_encrypt_dict(data: bytes) -> PdfEncryptInfo | None:
         return None
     version = int(m_v.group(1)) if m_v else 2
     revision = int(m_r.group(1)) if m_r else 3
-    default_bits = 40 if version == 1 else 128
+    default_bits = 40 if version == 1 else (256 if version == 5 else 128)
     raw_len = int(m_len.group(1)) if m_len else default_bits
     key_length_bits = raw_len * 8 if raw_len <= 32 else raw_len
     return PdfEncryptInfo(
@@ -281,12 +381,44 @@ def parse_pdf_encrypt_dict(data: bytes) -> PdfEncryptInfo | None:
         revision=revision,
         key_length_bits=key_length_bits,
         file_id_0=bytes.fromhex(m_id.group(1).decode("ascii")),
-        is_aes=b"/AESV2" in ebody,
+        is_aes=b"/AESV2" in ebody or b"/AESV3" in ebody or version == 5,
+        user_enc_key=_get_bytes_field(b"/UE"),
+        owner_enc_key=_get_bytes_field(b"/OE"),
     )
 
 
 def derive_pdf_encryption_key(password: str, enc_info: PdfEncryptInfo) -> bytes | None:
-    """Compute and verify a PDF Standard Security Handler user encryption key (Algorithm 2 & 5)."""
+    """Compute and verify a PDF Standard Security Handler user encryption key (R2/R3/R4 & R5 AES-256)."""
+    if enc_info.version == 5 and enc_info.revision == 5:
+        pw_utf8 = password.encode("utf-8", errors="replace")[:127]
+        u_bytes = enc_info.user_hash
+        ue_bytes = enc_info.user_enc_key
+        if len(u_bytes) >= 48 and len(ue_bytes) >= 32:
+            val_salt = u_bytes[32:40]
+            key_salt = u_bytes[40:48]
+            if hashlib.sha256(pw_utf8 + val_salt).digest() == u_bytes[:32]:
+                inter_key = hashlib.sha256(pw_utf8 + key_salt).digest()
+                return aes256_cbc_decrypt(
+                    inter_key,
+                    ue_bytes[:32],
+                    iv_prefix=False,
+                    unpad=False,
+                )
+        o_bytes = enc_info.owner_hash
+        oe_bytes = enc_info.owner_enc_key
+        if len(o_bytes) >= 48 and len(oe_bytes) >= 32 and len(u_bytes) >= 48:
+            o_val_salt = o_bytes[32:40]
+            o_key_salt = o_bytes[40:48]
+            if hashlib.sha256(pw_utf8 + o_val_salt + u_bytes[:48]).digest() == o_bytes[:32]:
+                inter_o_key = hashlib.sha256(pw_utf8 + o_key_salt + u_bytes[:48]).digest()
+                return aes256_cbc_decrypt(
+                    inter_o_key,
+                    oe_bytes[:32],
+                    iv_prefix=False,
+                    unpad=False,
+                )
+        return None
+
     pwd_bytes = (password.encode("latin1", errors="replace") + PDF_PADDING)[:32]
     md5 = hashlib.md5()
     md5.update(pwd_bytes)
@@ -390,12 +522,15 @@ def _extract_pdf_blocks(
                 raw_s = raw_s[:-1]
 
             if decryption_key is not None:
-                is_aes = enc_info is not None and enc_info.is_aes
-                salt = b"sAlT" if is_aes else b""
-                obj_key = hashlib.md5(
-                    decryption_key + struct.pack("<I", oid)[:3] + struct.pack("<I", gen)[:2] + salt
-                ).digest()[: min(len(decryption_key) + 5, 16)]
-                raw_s = aes128_cbc_decrypt(obj_key, raw_s) if is_aes else rc4_crypt(obj_key, raw_s)
+                if enc_info is not None and enc_info.version == 5 and len(decryption_key) == 32:
+                    raw_s = aes256_cbc_decrypt(decryption_key, raw_s, iv_prefix=True, unpad=True)
+                else:
+                    is_aes = enc_info is not None and enc_info.is_aes
+                    salt = b"sAlT" if is_aes else b""
+                    obj_key = hashlib.md5(
+                        decryption_key + struct.pack("<I", oid)[:3] + struct.pack("<I", gen)[:2] + salt
+                    ).digest()[: min(len(decryption_key) + 5, 16)]
+                    raw_s = aes128_cbc_decrypt(obj_key, raw_s) if is_aes else rc4_crypt(obj_key, raw_s)
 
             try:
                 obj_streams[oid] = zlib.decompress(raw_s.rstrip(b"\r\n")).decode("latin1", errors="replace")
@@ -423,6 +558,19 @@ def _extract_pdf_blocks(
             if foid in font_obj_cmaps:
                 font_name_cmaps[fname] = font_obj_cmaps[foid]
 
+    content_oid_to_page_cmaps: dict[int, dict[str, dict[int, str]]] = {}
+    for p_dict in obj_dicts.values():
+        m_cnt = re.search(r"/Contents\s+(\d+)\s+0\s+R", p_dict)
+        if m_cnt:
+            c_oid = int(m_cnt.group(1))
+            page_cmaps: dict[str, dict[int, str]] = {}
+            for fm in re.finditer(r"/(F\d+)\s+(\d+)\s+0\s+R", p_dict):
+                fname, foid = fm.group(1), int(fm.group(2))
+                if foid in font_obj_cmaps:
+                    page_cmaps[fname] = font_obj_cmaps[foid]
+            if page_cmaps:
+                content_oid_to_page_cmaps[c_oid] = page_cmaps
+
     fallback_cmap: dict[int, str] = {}
     for cm in font_obj_cmaps.values():
         fallback_cmap.update(cm)
@@ -436,6 +584,7 @@ def _extract_pdf_blocks(
         if "begincmap" in dec or "BT" not in dec:
             continue
         page_idx += 1
+        page_font_cmaps = content_oid_to_page_cmaps.get(_oid, font_name_cmaps)
         cur_cmap = fallback_cmap
         for bt_block in re.findall(r"\bBT\b(.*?)\bET\b", dec, re.DOTALL):
             x_coord, y_coord = 0.0, 0.0
@@ -455,7 +604,7 @@ def _extract_pdf_blocks(
             )
             for tok in re.finditer(token_pattern, bt_block):
                 if tok.group(1):
-                    cur_cmap = font_name_cmaps.get(tok.group(1), fallback_cmap)
+                    cur_cmap = page_font_cmaps.get(tok.group(1), font_name_cmaps.get(tok.group(1), fallback_cmap))
                 elif tok.group(2) is not None:
                     dx, dy = float(tok.group(2)), float(tok.group(3))
                     if first_td and y_coord == 0.0:
@@ -467,15 +616,28 @@ def _extract_pdf_blocks(
                         cid = int(hex_str[i : i + 4], 16)
                         chars.append(cur_cmap.get(cid, ""))
                 elif tok.group(5) is not None:
-                    unescaped = tok.group(5).replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\")
+                    raw_lit = _unescape_pdf_literal_bytes(tok.group(5).encode("latin1"))
                     if (
-                        chars
-                        and not chars[-1].endswith(" ")
-                        and not unescaped.startswith(" ")
-                        and bt_block.count("Tm") > 1
+                        cur_cmap
+                        and len(raw_lit) >= 2
+                        and len(raw_lit) % 2 == 0
+                        and (((raw_lit[0] << 8) | raw_lit[1]) in cur_cmap or raw_lit[0] == 0)
                     ):
-                        chars.append(" ")
-                    chars.append(unescaped)
+                        for i in range(0, len(raw_lit), 2):
+                            cid = (raw_lit[i] << 8) | raw_lit[i + 1]
+                            chars.append(cur_cmap.get(cid, ""))
+                    else:
+                        unescaped = (
+                            tok.group(5).replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\")
+                        )
+                        if (
+                            chars
+                            and not chars[-1].endswith(" ")
+                            and not unescaped.startswith(" ")
+                            and bt_block.count("Tm") > 1
+                        ):
+                            chars.append(" ")
+                        chars.append(unescaped)
             txt = "".join(chars).replace("\u200b", "").strip()
             if txt:
                 blocks.append((page_idx, round(y_coord, 1), round(x_coord, 1), txt))

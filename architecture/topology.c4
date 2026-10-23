@@ -255,6 +255,16 @@ model {
           sources 'Local PDF directory/file + Insta-Alerts (customercare@equitasbank.com)'
         }
       }
+
+      component fiFederalSource 'FiFederalStatementSource' {
+        #spine
+        description 'Decrypts AES-256-CBC (V=5, R=5 /AESV3) Fi Money / Federal Bank PDF statements, merges FedFiB/FIMONY SMS alerts, and backfills dormant-quarter interest'
+        technology 'AES-256-CBC PDF Decryptor • SMS Alert Chainer'
+        metadata {
+          supported_formats '.pdf (Fi Account Statement / Federal Bank), sms_inbox.txt'
+          sources 'Local PDF directory/file or Gmail IMAP (statement@epi.fi, fblcustomercare@federalbank.co.in)'
+        }
+      }
     }
 
     layer collectorAdapters 'Evidence Collector Adapters (expensieve.adapters.collectors)' {
@@ -308,10 +318,10 @@ model {
 
         extractor pdfTextEngine 'Pure-Python RC4/AES & 2D PDF Layout Engine (pdf_text)' {
           #extractorTag
-          description 'Decrypts RC4-128 & AES-128-CBC Standard Security streams, decompresses FlateDecode, parses /ToUnicode CMaps, and sorts blocks by 2D (page, Y, X) coordinates'
-          technology 'RC4 + AES-128-CBC + MD5 + zlib + /ToUnicode CMap (Zero C Deps)'
+          description 'Decrypts RC4-128, AES-128-CBC, & AES-256-CBC Standard Security streams, decompresses FlateDecode, parses /ToUnicode CMaps, and sorts blocks by 2D (page, Y, X) coordinates'
+          technology 'RC4 + AES-128/256-CBC + MD5/SHA-256 + zlib + /ToUnicode CMap (Zero C Deps)'
           metadata {
-            encryption 'PDF Standard Security Handler V1/V2/V4 R2/R3/R4 (RC4-128 & AESV2)'
+            encryption 'PDF Standard Security Handler V1/V2/V4/V5 R2/R3/R4/R5 (RC4-128, AESV2 & AESV3)'
             stream_codec 'FlateDecode (zlib)'
             glyph_mapping 'beginbfchar & beginbfrange UTF-16BE'
             layout_sorting '2D Coordinate Clustering (page, -Y, X)'
@@ -394,6 +404,7 @@ model {
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcCcPdfSource '1b. Decrypts & parses HDFC Credit Card PDF StatementRows'
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.dcbNiyoSource '1c. Decrypts DCB Niyo PDF & chains post-statement alerts'
   expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.equitasNiyoSource '1d. Decrypts Equitas NiyoX PDF statement chain & alerts'
+  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.fiFederalSource '1e. Decrypts Fi Money / Federal Bank AES-256 PDFs & merges SMS alerts'
   expensieve.serviceLayer.syncPipeline -> expensieve.domainLayer.declarativeRules '2a. Collects baseline rule & UPI remark evidence (Priority 40..60)'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.adbSmsCollector '2b. Collects exact UTC timestamps by 12-digit RRN (Priority 40)'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.timelineGeoCollector '2c. Collects Metro/Auto/QR route & venue evidence (Priority 75)'
@@ -419,6 +430,10 @@ model {
   expensieve.statementAdapters.equitasNiyoSource -> gmail_imap 'Reads encrypted Equitas PDFs & Insta-Alerts'
   expensieve.statementAdapters.equitasNiyoSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts AES-128-CBC + /ObjStm streams & extracts 2D table rows'
   expensieve.statementAdapters.equitasNiyoSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine'
+  expensieve.statementAdapters.fiFederalSource -> gmail_imap 'Fetches encrypted Fi Money / Federal Bank PDF statements'
+  expensieve.statementAdapters.fiFederalSource -> pixel_phone 'Reads FedFiB & FIMONY SMS alerts'
+  expensieve.statementAdapters.fiFederalSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts AES-256-CBC (V=5, R=5) streams & extracts 2D table rows'
+  expensieve.statementAdapters.fiFederalSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine'
 
   // Collectors & External Systems
   expensieve.collectorAdapters.adbSmsCollector -> pixel_phone 'Queries content://sms/inbox over ADB'
