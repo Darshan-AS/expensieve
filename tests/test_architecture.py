@@ -31,6 +31,8 @@ def test_compile_architecture_bundle_contains_all_views_and_extractors() -> None
     assert "extractor amazonEmailExtractor" in bundle.likec4_dsl
     assert "extractor travelExtractor" in bundle.likec4_dsl
     assert "extractor investmentExtractor" in bundle.likec4_dsl
+    assert "extractor hdfcCcExtractor" in bundle.likec4_dsl
+    assert "component hdfcCcPdfSource" in bundle.likec4_dsl
 
     # Verify ARCHITECTURE.md sections
     assert "## 1. Overarching System Landscape" in bundle.architecture_markdown

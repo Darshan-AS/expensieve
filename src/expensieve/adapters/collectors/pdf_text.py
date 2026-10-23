@@ -1,7 +1,179 @@
-"""Pure-Python PDF text extractor supporting FlateDecode streams, ToUnicode CMaps, and 2D layout sorting."""
+"""Pure-Python PDF text extractor supporting RC4 Standard Security decryption, FlateDecode streams, ToUnicode CMaps, and 2D layout sorting."""
 
+import hashlib
 import re
+import struct
 import zlib
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+PDF_PADDING: bytes = bytes.fromhex("28bf4e5e4e758a4164004e56fffa01082e2e00b6d0683e802f0ca9fe6453697a")
+
+
+@dataclass(frozen=True, slots=True)
+class PdfEncryptInfo:
+    """Parsed PDF Standard Security Handler (`/Encrypt`) dictionary parameters."""
+
+    encrypt_obj_id: int
+    owner_hash: bytes
+    user_hash: bytes
+    permissions: int
+    version: int
+    revision: int
+    key_length_bits: int
+    file_id_0: bytes
+
+
+def rc4_crypt(key: bytes, data: bytes) -> bytes:
+    """Pure-Python RC4 stream cipher for PDF Standard Security Handler decryption."""
+    if not key or not data:
+        return data
+    s = list(range(256))
+    j = 0
+    klen = len(key)
+    for i in range(256):
+        j = (j + s[i] + key[i % klen]) & 0xFF
+        s[i], s[j] = s[j], s[i]
+    i = 0
+    j = 0
+    out = bytearray(len(data))
+    for idx, byte_val in enumerate(data):
+        i = (i + 1) & 0xFF
+        j = (j + s[i]) & 0xFF
+        s[i], s[j] = s[j], s[i]
+        out[idx] = byte_val ^ s[(s[i] + s[j]) & 0xFF]
+    return bytes(out)
+
+
+def _unescape_pdf_literal_bytes(raw: bytes) -> bytes:
+    """Unescape a PDF literal string `(...)` byte sequence including octal and backslash escapes."""
+    out = bytearray()
+    i = 0
+    n = len(raw)
+    while i < n:
+        c = raw[i]
+        if c == 0x5C:  # backslash
+            i += 1
+            if i >= n:
+                break
+            esc = raw[i]
+            if esc == ord("n"):
+                out.append(10)
+            elif esc == ord("r"):
+                out.append(13)
+            elif esc == ord("t"):
+                out.append(9)
+            elif esc == ord("b"):
+                out.append(8)
+            elif esc == ord("f"):
+                out.append(12)
+            elif esc in (ord("("), ord(")"), ord("\\")):
+                out.append(esc)
+            elif 48 <= esc <= 55:
+                oct_s = chr(esc)
+                for _ in range(2):
+                    if i + 1 < n and 48 <= raw[i + 1] <= 55:
+                        i += 1
+                        oct_s += chr(raw[i])
+                    else:
+                        break
+                out.append(int(oct_s, 8) & 0xFF)
+            else:
+                out.append(esc)
+        else:
+            out.append(c)
+        i += 1
+    return bytes(out)
+
+
+def parse_pdf_encrypt_dict(data: bytes) -> PdfEncryptInfo | None:
+    """Parse `/Encrypt` object and trailer `/ID` from a PDF byte payload if encrypted."""
+    m_enc = re.search(rb"/Encrypt\s+(\d+)\s+0\s+R", data)
+    if not m_enc:
+        return None
+    enc_oid = int(m_enc.group(1))
+    obj_pat = rb"(?:^|[\r\n])" + str(enc_oid).encode("ascii") + rb"\s+0\s+obj\b(.*?)endobj"
+    m_obj = re.search(obj_pat, data, re.DOTALL)
+    if not m_obj:
+        return None
+    ebody = m_obj.group(1)
+
+    def _get_bytes_field(tag: bytes) -> bytes:
+        m_hex = re.search(tag + rb"\s*<([0-9A-Fa-f]+)>", ebody)
+        if m_hex:
+            return bytes.fromhex(m_hex.group(1).decode("ascii"))
+        idx = ebody.find(tag)
+        if idx == -1:
+            return b""
+        p_start = ebody.find(b"(", idx + len(tag))
+        if p_start == -1:
+            return b""
+        depth = 1
+        pos = p_start + 1
+        while pos < len(ebody) and depth > 0:
+            if ebody[pos] == 0x5C:
+                pos += 2
+                continue
+            if ebody[pos] == ord("("):
+                depth += 1
+            elif ebody[pos] == ord(")"):
+                depth -= 1
+            pos += 1
+        return _unescape_pdf_literal_bytes(ebody[p_start + 1 : pos - 1])
+
+    m_p = re.search(rb"/P\s+(-?\d+)", ebody)
+    m_v = re.search(rb"/V\s+(\d+)", ebody)
+    m_r = re.search(rb"/R\s+(\d+)", ebody)
+    m_len = re.search(rb"/Length\s+(\d+)", ebody)
+    m_id = re.search(rb"/ID\s*\[\s*<([0-9A-Fa-f]+)>", data)
+    if not (m_p and m_id):
+        return None
+    version = int(m_v.group(1)) if m_v else 2
+    revision = int(m_r.group(1)) if m_r else 3
+    default_bits = 40 if version == 1 else 128
+    return PdfEncryptInfo(
+        encrypt_obj_id=enc_oid,
+        owner_hash=_get_bytes_field(b"/O"),
+        user_hash=_get_bytes_field(b"/U"),
+        permissions=int(m_p.group(1)),
+        version=version,
+        revision=revision,
+        key_length_bits=int(m_len.group(1)) if m_len else default_bits,
+        file_id_0=bytes.fromhex(m_id.group(1).decode("ascii")),
+    )
+
+
+def derive_pdf_encryption_key(password: str, enc_info: PdfEncryptInfo) -> bytes | None:
+    """Compute and verify a PDF Standard Security Handler user encryption key (Algorithm 2 & 5)."""
+    pwd_bytes = (password.encode("latin1", errors="replace") + PDF_PADDING)[:32]
+    md5 = hashlib.md5()
+    md5.update(pwd_bytes)
+    md5.update(enc_info.owner_hash)
+    md5.update(struct.pack("<I", enc_info.permissions & 0xFFFFFFFF))
+    md5.update(enc_info.file_id_0)
+    digest = md5.digest()
+    key_len = max(5, enc_info.key_length_bits // 8)
+    if enc_info.revision >= 3:
+        for _ in range(50):
+            digest = hashlib.md5(digest[:key_len]).digest()
+    key = digest[:key_len]
+
+    if enc_info.revision == 2:
+        check = rc4_crypt(key, PDF_PADDING)
+        if check == enc_info.user_hash[:32]:
+            return key
+        return None
+
+    md5_u = hashlib.md5()
+    md5_u.update(PDF_PADDING)
+    md5_u.update(enc_info.file_id_0)
+    u_digest = md5_u.digest()
+    for i in range(20):
+        iter_key = bytes(b ^ i for b in key)
+        u_digest = rc4_crypt(iter_key, u_digest)
+    if u_digest == enc_info.user_hash[:16]:
+        return key
+    return None
 
 
 def _parse_tounicode_cmap(dec: str) -> dict[int, str]:
@@ -34,13 +206,30 @@ def _parse_tounicode_cmap(dec: str) -> dict[int, str]:
     return cmap
 
 
-def extract_pdf_lines(data: bytes) -> list[str]:
-    """Extract text lines from a PDF byte payload sorted by page and top-to-bottom Y coordinate."""
+def _extract_pdf_blocks(
+    data: bytes,
+    passwords: Sequence[str] = (),
+) -> list[tuple[int, float, float, str]]:
+    """Extract `(page_idx, y_coord, x_coord, text)` tuples from a PDF (decrypting if needed)."""
+    enc_info = parse_pdf_encrypt_dict(data)
+    decryption_key: bytes | None = None
+    if enc_info is not None:
+        candidate_passwords = ("", *passwords)
+        for pwd in candidate_passwords:
+            decryption_key = derive_pdf_encryption_key(pwd, enc_info)
+            if decryption_key is not None:
+                break
+        if decryption_key is None:
+            raise ValueError("Encrypted PDF could not be decrypted with the provided passwords.")
+
     obj_streams: dict[int, str] = {}
     obj_dicts: dict[int, str] = {}
 
-    for match in re.finditer(rb"(?:^|[\r\n])(\d+)\s+0\s+obj\b", data):
+    for match in re.finditer(rb"(?:^|[\r\n])(\d+)\s+(\d+)\s+obj\b", data):
         oid = int(match.group(1))
+        gen = int(match.group(2))
+        if enc_info is not None and oid == enc_info.encrypt_obj_id:
+            continue
         end_idx = data.find(b"endobj", match.end())
         if end_idx == -1:
             continue
@@ -53,6 +242,17 @@ def extract_pdf_lines(data: bytes) -> list[str]:
                 raw_s = raw_s[2:]
             elif raw_s.startswith((b"\n", b"\r")):
                 raw_s = raw_s[1:]
+            if raw_s.endswith(b"\r\n"):
+                raw_s = raw_s[:-2]
+            elif raw_s.endswith((b"\n", b"\r")):
+                raw_s = raw_s[:-1]
+
+            if decryption_key is not None:
+                obj_key = hashlib.md5(
+                    decryption_key + struct.pack("<I", oid)[:3] + struct.pack("<I", gen)[:2]
+                ).digest()[: min(len(decryption_key) + 5, 16)]
+                raw_s = rc4_crypt(obj_key, raw_s)
+
             try:
                 obj_streams[oid] = zlib.decompress(raw_s.rstrip(b"\r\n")).decode("latin1", errors="replace")
             except zlib.error:
@@ -93,21 +293,21 @@ def extract_pdf_lines(data: bytes) -> list[str]:
             continue
         page_idx += 1
         cur_cmap = fallback_cmap
-        for bt_block in re.findall(r"BT(.*?)ET", dec, re.DOTALL):
+        for bt_block in re.findall(r"\bBT\b(.*?)\bET\b", dec, re.DOTALL):
             x_coord, y_coord = 0.0, 0.0
             tm = re.search(
-                r"1\s+0\s+0\s+-1\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm",
+                r"1\s+0\s+0\s+-?1\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm",
                 bt_block,
             )
             if tm:
-                x_coord, y_coord = float(tm.group(1)), float(tm.group(2))
+                x_coord, y_coord = float(tm.group(1)), abs(float(tm.group(2)))
             chars: list[str] = []
             first_td = True
             token_pattern = (
                 r"/(F\d+)\s+[\d.]+\s+Tf|"
                 r"(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Td|"
                 r"<([0-9A-Fa-f]+)>\s*Tj|"
-                r"\(([^()]*)\)\s*Tj"
+                r"\(([^()\\]*(?:\\.[^()\\]*)*)\)\s*Tj"
             )
             for tok in re.finditer(token_pattern, bt_block):
                 if tok.group(1):
@@ -123,15 +323,45 @@ def extract_pdf_lines(data: bytes) -> list[str]:
                         cid = int(hex_str[i : i + 4], 16)
                         chars.append(cur_cmap.get(cid, ""))
                 elif tok.group(5) is not None:
-                    chars.append(tok.group(5))
+                    unescaped = tok.group(5).replace(r"\(", "(").replace(r"\)", ")").replace(r"\\", "\\")
+                    if (
+                        chars
+                        and not chars[-1].endswith(" ")
+                        and not unescaped.startswith(" ")
+                        and bt_block.count("Tm") > 1
+                    ):
+                        chars.append(" ")
+                    chars.append(unescaped)
             txt = "".join(chars).replace("\u200b", "").strip()
             if txt:
                 blocks.append((page_idx, round(y_coord, 1), round(x_coord, 1), txt))
 
     blocks.sort(key=lambda b: (b[0], b[1], b[2]))
-    return [b[3] for b in blocks]
+    return blocks
 
 
-def extract_pdf_text(data: bytes) -> str:
+def extract_pdf_lines(data: bytes, passwords: Sequence[str] = ()) -> list[str]:
+    """Extract text lines from a PDF byte payload sorted by page and top-to-bottom Y coordinate."""
+    return [b[3] for b in _extract_pdf_blocks(data, passwords=passwords)]
+
+
+def extract_pdf_rows_by_y(
+    data: bytes,
+    passwords: Sequence[str] = (),
+) -> list[tuple[int, float, tuple[str, ...]]]:
+    """Group PDF text blocks sharing the same `(page, y_coord)` into left-to-right column tuples."""
+    blocks = _extract_pdf_blocks(data, passwords=passwords)
+    grouped: dict[tuple[int, float], list[tuple[float, str]]] = {}
+    for page_idx, y_coord, x_coord, txt in blocks:
+        grouped.setdefault((page_idx, y_coord), []).append((x_coord, txt))
+
+    rows: list[tuple[int, float, tuple[str, ...]]] = []
+    for (page_idx, y_coord), cols in sorted(grouped.items()):
+        cols.sort(key=lambda c: c[0])
+        rows.append((page_idx, y_coord, tuple(c[1] for c in cols)))
+    return rows
+
+
+def extract_pdf_text(data: bytes, passwords: Sequence[str] = ()) -> str:
     """Extract newline-delimited sorted text from a PDF byte payload."""
-    return "\n".join(extract_pdf_lines(data))
+    return "\n".join(extract_pdf_lines(data, passwords=passwords))

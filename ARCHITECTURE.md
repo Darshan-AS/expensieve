@@ -76,12 +76,12 @@ flowchart TB
 
 | Priority | Enum | Adapter / Collector | Extracted Enrichment |
 | :--- | :--- | :--- | :--- |
-| **`95`** | `EMAIL_PDF_INVOICE` | `GmailImapCollector` + `pdf_text` | **Namma Yatri** (`invoice_*.pdf`), **Rapido** (`AUTO/CAB_RECEIPT_*.pdf`), **Swiggy** dishes, **Amazon** shipments/pharmacy, **ConfirmTkt/IRCTC/MakeMyTrip** bookings, **Shriram Finance FD & IPO** advices |
+| **`95`** | `EMAIL_PDF_INVOICE` | `GmailImapCollector` + `pdf_text` | **Namma Yatri** (`invoice_*.pdf`), **Rapido** (`AUTO/CAB_RECEIPT_*.pdf`), **Swiggy** dishes, **Amazon** shipments/pharmacy, **ConfirmTkt/IRCTC/MakeMyTrip** bookings, **Shriram Finance FD & IPO** advices, **HDFC Credit Card** InstaAlerts & encrypted PDF statements |
 | **`85`** | `MERCHANT_WEB_SCRAPE` | `CachedMerchantOrderCollector` | **Zomato** restaurant + dish names, **Zepto** & **Blinkit** itemized groceries/pharmacy, **Amazon** order cache, **Uber** (`Auto` vs `Cab` routes & cancellation fees) |
 | **`75`** | `TIMELINE_GEO` | `TimelineGeoCollector` | **Namma Metro** station-to-station routes (`Metro, <Origin> to <Dest>`), Auto/Cab GPS routes, and local QR merchant place names via `Gazetteer` + `Nominatim` |
 | **`60`** | `EXPLICIT_UPI_REMARK` | `DeclarativeRuleCollector` | Human-written UPI remarks decomposed from statement narrations |
 | **`40`** | `DECLARATIVE_RULE` | `AdbSmsCollector` / `DeclarativeRuleCollector` | Exact second-level UTC timestamps via 12-digit UPI RRN matching + VPA/keyword categorization |
-| **`10`** | `STATEMENT_FALLBACK` | `HdfcDelimitedStatementSource` | Raw payee title-casing and `Needs Review` tag when confidence `< 0.75` |
+| **`10`** | `STATEMENT_FALLBACK` | `HdfcDelimitedStatementSource` / `HdfcCreditCardPdfStatementSource` | Raw payee title-casing and `Needs Review` tag when confidence `< 0.75` |
 
 ---
 
@@ -91,21 +91,22 @@ flowchart TB
 flowchart LR
     IMAP[("Gmail IMAP SSL\nimap.gmail.com:993")]
     COL["GmailImapCollector\nMIME Decoder & Dispatcher"]
-    PDF["pdf_text.py\nzlib FlateDecode + /ToUnicode CMap\n2D (Page, -Y, X) Line Clustering"]
+    PDF["pdf_text.py\nRC4-128 Decrypt + zlib FlateDecode + /ToUnicode CMap\n2D (Page, -Y, X) Line Clustering"]
     GAZ["Gazetteer.normalize_address\nLandmark Snapping"]
 
-    subgraph Extractors["6 Pluggable ReceiptExtractor Strategies"]
+    subgraph Extractors["7 Pluggable ReceiptExtractor Strategies"]
         NY["NammaYatriPdfExtractor\nfrom:nammayatri.in"]
         RAP["RapidoReceiptExtractor\nfrom:rapido.bike"]
         SWG["SwiggyReceiptExtractor\nfrom:noreply@swiggy.in"]
         AMZ["AmazonEmailExtractor\nfrom:auto-confirm@amazon.in"]
         TRV["TravelBookingExtractor\nConfirmTkt / IRCTC / MMT"]
         INV["InvestmentEmailExtractor\nShriram FD / KFintech / MUFG"]
+        HCC["HdfcCreditCardExtractor\nalerts@hdfcbank.net / Emailstatements.cards"]
     end
 
     IMAP ==> COL
-    COL --> NY & RAP & SWG & AMZ & TRV & INV
-    NY & RAP --> PDF --> GAZ
+    COL --> NY & RAP & SWG & AMZ & TRV & INV & HCC
+    NY & RAP & HCC --> PDF --> GAZ
 ```
 
 | Extractor | Query Filter | Attachment / Body Format | Output Note Format & Category |
@@ -116,3 +117,4 @@ flowchart LR
 | `AmazonEmailExtractor` | `from:auto-confirm@amazon.in` | Shipment confirmation emails | `<Item 1>, <Item 2>` (`Pharmacy`, `Groceries`, `Electronics`, `Shopping`) |
 | `TravelBookingExtractor` | `ConfirmTkt / IRCTC / MakeMyTrip` | Booking confirmation emails | `Train to <Dest> (<Train>, <Class>, PNR <PNR>)` (`Holiday, trips, hotels`) |
 | `InvestmentEmailExtractor` | `Shriram / KFintech / MUFG` | FD & IPO allotment advices | Transfer to `Investments` (`<IPO Name> IPO allotment` / `FD interest`) |
+| `HdfcCreditCardExtractor` | `alerts@hdfcbank.net / Emailstatements.cards` | Encrypted RC4-128 CC PDF + InstaAlerts | Exact UTC timestamps + Transfer to `HDFC Credit Card` |

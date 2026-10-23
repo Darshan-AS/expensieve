@@ -264,6 +264,16 @@ model {{
           upi_fields 'Payee, VPA, Bank Code, 12-digit RRN, Remark'
         }}
       }}
+
+      component hdfcCcPdfSource 'HdfcCreditCardPdfStatementSource' {{
+        #spine
+        description 'Decrypts password-protected HDFC Credit Card monthly PDF statements (from disk or Gmail IMAP) and extracts domestic/international rows'
+        technology 'RC4-128 PDF Decryptor • 2D Table Parser'
+        metadata {{
+          supported_formats '.pdf (HDFC Credit Card Statements)'
+          sources 'Local PDF file/directory or Gmail IMAP (Emailstatements.cards@hdfcbank.net)'
+        }}
+      }}
     }}
 
     layer collectorAdapters 'Evidence Collector Adapters (expensieve.adapters.collectors)' {{
@@ -302,11 +312,11 @@ model {{
 
       component gmailImapCollector 'GmailImapCollector' {{
         #collector
-        description 'Connects to imap.gmail.com and dispatches decoded MIME messages & PDF attachments to 6 pluggable ReceiptExtractor strategies'
+        description 'Connects to imap.gmail.com and dispatches decoded MIME messages & PDF attachments to 7 pluggable ReceiptExtractor strategies'
         technology 'Priority {p_pdf} (INVOICE_PDF)'
         metadata {{
           protocol 'IMAP4_SSL (imap.gmail.com:993)'
-          extractors '6 pluggable ReceiptExtractor strategies'
+          extractors '7 pluggable ReceiptExtractor strategies'
         }}
 
         extractor imapDispatcher 'IMAP MIME Fetcher & Strategy Dispatcher' {{
@@ -315,11 +325,12 @@ model {{
           technology 'imaplib + email.message'
         }}
 
-        extractor pdfTextEngine 'Pure-Python 2D PDF Layout Engine (pdf_text)' {{
+        extractor pdfTextEngine 'Pure-Python RC4 & 2D PDF Layout Engine (pdf_text)' {{
           #extractorTag
-          description 'Decompresses FlateDecode streams, parses per-font /ToUnicode CMaps, and sorts text blocks by 2D (page, Y, X) coordinates'
-          technology 'zlib + /ToUnicode CMap (Zero C Deps)'
+          description 'Decrypts RC4-128 Standard Security streams, decompresses FlateDecode, parses /ToUnicode CMaps, and sorts blocks by 2D (page, Y, X) coordinates'
+          technology 'RC4 + MD5 + zlib + /ToUnicode CMap (Zero C Deps)'
           metadata {{
+            encryption 'PDF Standard Security Handler V1/V2 R2/R3 (RC4-128)'
             stream_codec 'FlateDecode (zlib)'
             glyph_mapping 'beginbfchar & beginbfrange UTF-16BE'
             layout_sorting '2D Coordinate Clustering (page, -Y, X)'
@@ -361,6 +372,12 @@ model {{
           description 'Extracts IPO allotments (KFintech/MUFG) and Shriram Finance FD interest/maturity principal transfers to Investments'
           technology 'Shriram Finance • KFintech • MUFG'
         }}
+
+        extractor hdfcCcExtractor 'HdfcCreditCardExtractor' {{
+          #extractorTag
+          description 'Extracts exact second-level IST timestamps from HDFC Credit Card InstaAlerts and bill-payment transfers from encrypted CC PDFs'
+          technology 'alerts@hdfcbank.net • Emailstatements.cards@hdfcbank.net'
+        }}
       }}
     }}
 
@@ -392,7 +409,8 @@ model {{
 
   // Pipeline Orchestration
   expensieve.serviceLayer.syncPipeline -> expensieve.portsLayer.protocols 'Depends exclusively on PEP 544 structural Protocols'
-  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcSource '1. Parses new StatementRows after cutoff RRN'
+  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcSource '1a. Parses new bank StatementRows after cutoff RRN'
+  expensieve.serviceLayer.syncPipeline -> expensieve.statementAdapters.hdfcCcPdfSource '1b. Decrypts & parses HDFC Credit Card PDF StatementRows'
   expensieve.serviceLayer.syncPipeline -> expensieve.domainLayer.declarativeRules '2a. Collects baseline rule & UPI remark evidence (Priority {p_rule}..{p_rem})'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.adbSmsCollector '2b. Collects exact UTC timestamps by 12-digit RRN (Priority {p_rule})'
   expensieve.serviceLayer.syncPipeline -> expensieve.collectorAdapters.timelineGeoCollector '2c. Collects Metro/Auto/QR route & venue evidence (Priority {p_geo})'
@@ -406,9 +424,12 @@ model {{
   expensieve.domainLayer.declarativeRules -> expensieve.domainLayer.models 'Emits EnrichmentEvidence'
   expensieve.domainLayer.gazetteer -> expensieve.domainLayer.models 'Snaps GeoPoint & normalizes addresses'
 
-  // Statement Adapter
+  // Statement Adapters
   expensieve.statementAdapters.hdfcSource -> hdfc_bank 'Reads delimited statement file'
   expensieve.statementAdapters.hdfcSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine'
+  expensieve.statementAdapters.hdfcCcPdfSource -> gmail_imap 'Fetches encrypted monthly Credit Card PDFs'
+  expensieve.statementAdapters.hdfcCcPdfSource -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts RC4-128 streams & extracts 2D table rows'
+  expensieve.statementAdapters.hdfcCcPdfSource -> expensieve.domainLayer.models 'Emits StatementRow accounting spine'
 
   // Collectors & External Systems
   expensieve.collectorAdapters.adbSmsCollector -> pixel_phone 'Queries content://sms/inbox over ADB'
@@ -426,9 +447,11 @@ model {{
   expensieve.collectorAdapters.gmailImapCollector.imapDispatcher -> expensieve.collectorAdapters.gmailImapCollector.amazonEmailExtractor 'Dispatches from:auto-confirm@amazon.in messages'
   expensieve.collectorAdapters.gmailImapCollector.imapDispatcher -> expensieve.collectorAdapters.gmailImapCollector.travelExtractor 'Dispatches ConfirmTkt / IRCTC / MakeMyTrip messages'
   expensieve.collectorAdapters.gmailImapCollector.imapDispatcher -> expensieve.collectorAdapters.gmailImapCollector.investmentExtractor 'Dispatches Shriram Finance / KFintech / MUFG IPO messages'
+  expensieve.collectorAdapters.gmailImapCollector.imapDispatcher -> expensieve.collectorAdapters.gmailImapCollector.hdfcCcExtractor 'Dispatches HDFC Credit Card InstaAlerts & Statement PDFs'
 
   expensieve.collectorAdapters.gmailImapCollector.nammaYatriExtractor -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Extracts 2D-sorted lines from invoice_*.pdf'
   expensieve.collectorAdapters.gmailImapCollector.rapidoExtractor -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Extracts 2D-sorted lines from AUTO/CAB_RECEIPT_*.pdf'
+  expensieve.collectorAdapters.gmailImapCollector.hdfcCcExtractor -> expensieve.collectorAdapters.gmailImapCollector.pdfTextEngine 'Decrypts RC4-128 Credit Card PDFs & extracts rows'
   expensieve.collectorAdapters.gmailImapCollector.nammaYatriExtractor -> expensieve.domainLayer.gazetteer 'Normalizes raw pickup/drop addresses to landmarks'
   expensieve.collectorAdapters.gmailImapCollector.rapidoExtractor -> expensieve.domainLayer.gazetteer 'Normalizes raw pickup/drop addresses to landmarks'
 
@@ -652,12 +675,12 @@ flowchart TB
 
 | Priority | Enum | Adapter / Collector | Extracted Enrichment |
 | :--- | :--- | :--- | :--- |
-| **`95`** | `EMAIL_PDF_INVOICE` | `GmailImapCollector` + `pdf_text` | **Namma Yatri** (`invoice_*.pdf`), **Rapido** (`AUTO/CAB_RECEIPT_*.pdf`), **Swiggy** dishes, **Amazon** shipments/pharmacy, **ConfirmTkt/IRCTC/MakeMyTrip** bookings, **Shriram Finance FD & IPO** advices |
+| **`95`** | `EMAIL_PDF_INVOICE` | `GmailImapCollector` + `pdf_text` | **Namma Yatri** (`invoice_*.pdf`), **Rapido** (`AUTO/CAB_RECEIPT_*.pdf`), **Swiggy** dishes, **Amazon** shipments/pharmacy, **ConfirmTkt/IRCTC/MakeMyTrip** bookings, **Shriram Finance FD & IPO** advices, **HDFC Credit Card** InstaAlerts & encrypted PDF statements |
 | **`85`** | `MERCHANT_WEB_SCRAPE` | `CachedMerchantOrderCollector` | **Zomato** restaurant + dish names, **Zepto** & **Blinkit** itemized groceries/pharmacy, **Amazon** order cache, **Uber** (`Auto` vs `Cab` routes & cancellation fees) |
 | **`75`** | `TIMELINE_GEO` | `TimelineGeoCollector` | **Namma Metro** station-to-station routes (`Metro, <Origin> to <Dest>`), Auto/Cab GPS routes, and local QR merchant place names via `Gazetteer` + `Nominatim` |
 | **`60`** | `EXPLICIT_UPI_REMARK` | `DeclarativeRuleCollector` | Human-written UPI remarks decomposed from statement narrations |
 | **`40`** | `DECLARATIVE_RULE` | `AdbSmsCollector` / `DeclarativeRuleCollector` | Exact second-level UTC timestamps via 12-digit UPI RRN matching + VPA/keyword categorization |
-| **`10`** | `STATEMENT_FALLBACK` | `HdfcDelimitedStatementSource` | Raw payee title-casing and `Needs Review` tag when confidence `< 0.75` |
+| **`10`** | `STATEMENT_FALLBACK` | `HdfcDelimitedStatementSource` / `HdfcCreditCardPdfStatementSource` | Raw payee title-casing and `Needs Review` tag when confidence `< 0.75` |
 
 ---
 
@@ -667,21 +690,22 @@ flowchart TB
 flowchart LR
     IMAP[("Gmail IMAP SSL\\nimap.gmail.com:993")]
     COL["GmailImapCollector\\nMIME Decoder & Dispatcher"]
-    PDF["pdf_text.py\\nzlib FlateDecode + /ToUnicode CMap\\n2D (Page, -Y, X) Line Clustering"]
+    PDF["pdf_text.py\\nRC4-128 Decrypt + zlib FlateDecode + /ToUnicode CMap\\n2D (Page, -Y, X) Line Clustering"]
     GAZ["Gazetteer.normalize_address\\nLandmark Snapping"]
 
-    subgraph Extractors["6 Pluggable ReceiptExtractor Strategies"]
+    subgraph Extractors["7 Pluggable ReceiptExtractor Strategies"]
         NY["NammaYatriPdfExtractor\\nfrom:nammayatri.in"]
         RAP["RapidoReceiptExtractor\\nfrom:rapido.bike"]
         SWG["SwiggyReceiptExtractor\\nfrom:noreply@swiggy.in"]
         AMZ["AmazonEmailExtractor\\nfrom:auto-confirm@amazon.in"]
         TRV["TravelBookingExtractor\\nConfirmTkt / IRCTC / MMT"]
         INV["InvestmentEmailExtractor\\nShriram FD / KFintech / MUFG"]
+        HCC["HdfcCreditCardExtractor\\nalerts@hdfcbank.net / Emailstatements.cards"]
     end
 
     IMAP ==> COL
-    COL --> NY & RAP & SWG & AMZ & TRV & INV
-    NY & RAP --> PDF --> GAZ
+    COL --> NY & RAP & SWG & AMZ & TRV & INV & HCC
+    NY & RAP & HCC --> PDF --> GAZ
 ```
 
 | Extractor | Query Filter | Attachment / Body Format | Output Note Format & Category |
@@ -692,6 +716,7 @@ flowchart LR
 | `AmazonEmailExtractor` | `from:auto-confirm@amazon.in` | Shipment confirmation emails | `<Item 1>, <Item 2>` (`Pharmacy`, `Groceries`, `Electronics`, `Shopping`) |
 | `TravelBookingExtractor` | `ConfirmTkt / IRCTC / MakeMyTrip` | Booking confirmation emails | `Train to <Dest> (<Train>, <Class>, PNR <PNR>)` (`Holiday, trips, hotels`) |
 | `InvestmentEmailExtractor` | `Shriram / KFintech / MUFG` | FD & IPO allotment advices | Transfer to `Investments` (`<IPO Name> IPO allotment` / `FD interest`) |
+| `HdfcCreditCardExtractor` | `alerts@hdfcbank.net / Emailstatements.cards` | Encrypted RC4-128 CC PDF + InstaAlerts | Exact UTC timestamps + Transfer to `HDFC Credit Card` |
 """
 
 

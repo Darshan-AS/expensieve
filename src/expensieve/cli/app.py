@@ -15,12 +15,16 @@ from expensieve.adapters.collectors.gmail_imap import GmailImapCollector
 from expensieve.adapters.collectors.timeline_geo import TimelineGeoCollector
 from expensieve.adapters.geocoding.nominatim_cache import CachedNominatimGeocoder
 from expensieve.adapters.sinks.sourdough_sink import SourdoughLedgerSink
+from expensieve.adapters.statements.hdfc_cc_pdf import (
+    DEFAULT_CC_PDF_PASSWORDS,
+    HdfcCreditCardPdfStatementSource,
+)
 from expensieve.adapters.statements.hdfc_delimited import HdfcDelimitedStatementSource
 from expensieve.domain.architecture import compile_architecture_bundle
 from expensieve.domain.gazetteer import Gazetteer
 from expensieve.domain.models import GeoPoint
 from expensieve.domain.rules import DeclarativeRuleCollector
-from expensieve.ports.protocols import EvidenceCollector
+from expensieve.ports.protocols import EvidenceCollector, StatementSource
 from expensieve.services.pipeline import SyncPipeline
 
 app = typer.Typer(
@@ -31,19 +35,59 @@ app = typer.Typer(
 console = Console()
 
 
+def _discover_wallet_state_gmail_credentials() -> tuple[str | None, str | None]:
+    """Discover `email` and `gmailAppPassword` from local or sibling `.wallet_state.json` if present."""
+    candidates = (
+        Path.cwd() / ".wallet_state.json",
+        Path.cwd().parent / "sourdough" / ".wallet_state.json",
+        Path(__file__).resolve().parents[4] / "sourdough" / ".wallet_state.json",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+                user = raw.get("email")
+                pwd = raw.get("gmailAppPassword")
+                if isinstance(user, str) and isinstance(pwd, str) and user and pwd:
+                    return user.strip(), pwd.strip()
+            except OSError, ValueError:
+                continue
+    return None, None
+
+
 @app.command("sync")
 def sync_command(
     statement: Annotated[
-        Path,
-        typer.Option("--statement", "-s", help="Path to HDFC delimited (.txt/.csv) statement file."),
-    ],
+        Path | None,
+        typer.Option(
+            "--statement",
+            "-s",
+            help="Path to HDFC delimited (.txt/.csv) statement file, or HDFC Credit Card PDF file/directory.",
+        ),
+    ] = None,
     account: Annotated[
         str,
         typer.Option("--account", "-a", help="Target account name in ledger."),
     ] = "HDFC",
     cutoff_ref: Annotated[
         str | None,
-        typer.Option("--cutoff-ref", "-c", help="Last already-recorded 12-digit RRN or reference number."),
+        typer.Option(
+            "--cutoff-ref", "-c", help="Last already-recorded 12-digit RRN, reference, or YYYY-MM-DD."
+        ),
+    ] = None,
+    fetch_cc_gmail: Annotated[
+        bool,
+        typer.Option(
+            "--fetch-cc-gmail",
+            help="Fetch monthly HDFC Credit Card statement PDFs directly from Gmail IMAP.",
+        ),
+    ] = False,
+    pdf_password: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--pdf-password",
+            help="Password(s) for decrypting PDF statements (defaults to DARS3835, DARS5631, 128789591).",
+        ),
     ] = None,
     sms_cache: Annotated[
         Path | None,
@@ -104,12 +148,44 @@ def sync_command(
         typer.Option("--dry-run/--live", help="Validate against Sourdough sink without writing to CouchDB."),
     ] = True,
 ) -> None:
-    """Parse statement, collect multi-source evidence (SMS, Timeline, Rules), and stage or push."""
-    source = HdfcDelimitedStatementSource(
-        path=statement,
-        account_name=account,
-        cutoff_ref=cutoff_ref,
-    )
+    """Parse statement, collect multi-source evidence (SMS, Timeline, Gmail, Rules), and stage or push."""
+    if not gmail_user or not gmail_app_password:
+        disc_user, disc_pwd = _discover_wallet_state_gmail_credentials()
+        gmail_user = gmail_user or disc_user
+        gmail_app_password = gmail_app_password or disc_pwd
+
+    passwords = tuple(pdf_password) if pdf_password else DEFAULT_CC_PDF_PASSWORDS
+    source: StatementSource
+    if fetch_cc_gmail:
+        if not gmail_user or not gmail_app_password:
+            raise typer.BadParameter(
+                "--fetch-cc-gmail requires Gmail credentials via --gmail-user/--gmail-app-password or .wallet_state.json."
+            )
+        target_acc = "HDFC Credit Card" if account == "HDFC" else account
+        source = HdfcCreditCardPdfStatementSource.from_gmail_imap(
+            email_address=gmail_user,
+            app_password=gmail_app_password,
+            account_name=target_acc,
+            cutoff_ref=cutoff_ref,
+            passwords=passwords,
+        )
+    elif statement is not None:
+        if statement.is_dir() or statement.suffix.lower() == ".pdf":
+            target_acc = "HDFC Credit Card" if account == "HDFC" else account
+            source = HdfcCreditCardPdfStatementSource(
+                path=statement,
+                account_name=target_acc,
+                cutoff_ref=cutoff_ref,
+                passwords=passwords,
+            )
+        else:
+            source = HdfcDelimitedStatementSource(
+                path=statement,
+                account_name=account,
+                cutoff_ref=cutoff_ref,
+            )
+    else:
+        raise typer.BadParameter("Provide --statement <path> or --fetch-cc-gmail.")
     rows = source.parse()
     collectors: list[EvidenceCollector] = [DeclarativeRuleCollector()]
 

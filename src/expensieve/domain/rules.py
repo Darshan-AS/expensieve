@@ -1,5 +1,6 @@
 """Declarative classification and enrichment rules for ExpenSieve."""
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -542,6 +543,203 @@ class DeclarativeRuleCollector:
                 payee="NiyoX",
                 note="Transfer to NiyoX",
                 transfer_account="NiyoX",
+                needs_review=False,
+            )
+        if row.is_credit and (
+            "TELE TRANSFER CREDIT" in narr_u or ("IMPS PMT" in narr_u and "REF#" in narr_u)
+        ):
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=1.0,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="CRED",
+                note="Credit card bill payment",
+                transfer_account="HDFC",
+                needs_review=False,
+            )
+        if "BLOSSOM BOOK HOUSE" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Books, audio, subscriptions",
+                payee="Blossom Book House",
+                note="",
+                needs_review=False,
+            )
+        if "KAKE DI HATTI" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Meals & Fast Food",
+                payee="Kake Di Hatti",
+                note="Kake Di Hatti",
+                needs_review=False,
+            )
+        if "REGENTA PLACE" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Meals & Fast Food",
+                payee="Regenta Place",
+                note="Regenta Place",
+                needs_review=False,
+            )
+        if "REL RETAIL LTD DIGITAL" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Electronics, accessories",
+                payee="Reliance Digital",
+                note="",
+                needs_review=False,
+            )
+        if "MANIPAL HEALTH ENTERPR" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Healthcare",
+                payee="Manipal Hospital",
+                note="",
+                labels=("Family",),
+                needs_review=False,
+            )
+        if "STORIES BAR AND KITCHE" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Meals & Fast Food",
+                payee="Stories Bar and Kitchen",
+                note="",
+                needs_review=False,
+            )
+        if "NKP EMPIRE VENTURES" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Meals & Fast Food",
+                payee="Empire Restaurant",
+                note="",
+                needs_review=False,
+            )
+        if "GOOGLEPLAY" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Charges, fees",
+                payee="Google",
+                note="",
+                needs_review=False,
+            )
+        if "DESI MASALA" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Meals & Fast Food",
+                payee="Desi Masala",
+                note="",
+                needs_review=False,
+            )
+
+        m_parent = re.search(r"\[Parent:\s*([^\]]+)\]", narr)
+        parent_ctx = m_parent.group(1).strip() if m_parent else ""
+        base_narr_u = re.sub(r"\[Parent:\s*[^\]]+\]", "", narr_u).strip()
+
+        if base_narr_u.startswith("IGST-") or "IGST-VPS" in base_narr_u:
+            igst_note = f"IGST on {parent_ctx}" if parent_ctx else "IGST on credit card fee"
+            if row.is_credit:
+                igst_note = f"{igst_note} reversal"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=kind,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Charges, fees",
+                payee="HDFC",
+                note=igst_note,
+                needs_review=False,
+            )
+        if "FIRST YEAR MEMBERSHIP FEE" in base_narr_u or "RENEWAL MEMBERSHIP FEE" in base_narr_u:
+            fee_label = (
+                "First year membership fee"
+                if "FIRST YEAR" in base_narr_u
+                else "Renewal membership fee"
+            )
+            if row.is_credit:
+                fee_label = f"{fee_label} reversal"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=kind,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Charges, fees",
+                payee="HDFC",
+                note=fee_label,
+                needs_review=False,
+            )
+        if (
+            "1% ON ALL DCC TRANSACTION" in base_narr_u
+            or "CONSOLIDATED FCY MARKUP FEE" in base_narr_u
+        ):
+            base_fee = (
+                "DCC markup fee"
+                if "1% ON ALL DCC" in base_narr_u
+                else "Foreign currency markup fee"
+            )
+            fee_note = f"{base_fee} ({parent_ctx})" if parent_ctx else base_fee
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=kind,
+                payment_method=PaymentMethod.CREDIT_CARD,
+                category="Charges, fees",
+                payee="HDFC",
+                note=fee_note,
                 needs_review=False,
             )
         return EnrichmentEvidence(

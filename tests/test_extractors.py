@@ -12,13 +12,26 @@ from expensieve.adapters.collectors.chrome_cdp import (
 from expensieve.adapters.collectors.gmail_imap import (
     AmazonEmailExtractor,
     EmailMessagePayload,
+    HdfcCreditCardExtractor,
     InvestmentEmailExtractor,
     NammaYatriPdfExtractor,
     RapidoReceiptExtractor,
     SwiggyReceiptExtractor,
     TravelBookingExtractor,
 )
-from expensieve.domain.models import StatementRow, TransactionKind
+from expensieve.adapters.collectors.pdf_text import rc4_crypt
+from expensieve.adapters.statements.hdfc_cc_pdf import (
+    HdfcCreditCardPdfStatementSource,
+    parse_hdfc_cc_pdf_bytes,
+)
+from expensieve.domain.models import (
+    CanonicalTransaction,
+    DebtLinkGroup,
+    PaymentMethod,
+    StatementRow,
+    TransactionKind,
+)
+from expensieve.domain.rules import DeclarativeRuleCollector
 
 
 def _make_row(
@@ -310,6 +323,225 @@ class TestMerchantOrderCollectors(unittest.TestCase):
         b_evs = collector.match_blinkit_orders([b_row], b_orders, default_year=2026)
         self.assertEqual(len(b_evs), 1)
         self.assertEqual(b_evs[0].note, "2x Nandini Curd\n1x Whole Wheat Bread")
+
+
+class TestHdfcCreditCardPdfAndAlerts(unittest.TestCase):
+    def test_rc4_roundtrip(self) -> None:
+        key = b"DARS3835"
+        plain = b"HDFC Millennia Credit Card Statement"
+        cipher = rc4_crypt(key, plain)
+        self.assertNotEqual(cipher, plain)
+        self.assertEqual(rc4_crypt(key, cipher), plain)
+
+    def test_hdfc_cc_pdf_parser_and_statement_source(self) -> None:
+        raw_stream = (
+            b"BT 1 0 0 1 20 -80.1 Tm (Statement Date:15/06/2025) Tj ET\n"
+            b"BT 1 0 0 1 271.5 -211.6 Tm (Previous Balance) Tj ET\n"
+            b"BT 1 0 0 1 533.1 -211.6 Tm (Total Dues) Tj ET\n"
+            b"BT 1 0 0 1 271.5 -236.6 Tm (0.49) Tj ET\n"
+            b"BT 1 0 0 1 341.1 -236.6 Tm (0.00) Tj ET\n"
+            b"BT 1 0 0 1 397.1 -236.6 Tm (928.00) Tj ET\n"
+            b"BT 1 0 0 1 477.1 -236.6 Tm (0.00) Tj ET\n"
+            b"BT 1 0 0 1 533.1 -236.6 Tm (928.00) Tj ET\n"
+            b"BT 1 0 0 1 248.5 -426.0 Tm (Domestic Transactions) Tj ET\n"
+            b"BT 1 0 0 1 37.5 -478.0 Tm (17/05/2025) Tj ET\n"
+            b"BT 1 0 0 1 112.0 -478.0 Tm (KAKE DI HATTI          BANGALORE) Tj ET\n"
+            b"BT 1 0 0 1 523.0 -478.0 Tm (928.00) Tj ET\n"
+            b"BT 1 0 0 1 37.5 -489.0 Tm (25/06/2025) Tj ET\n"
+            b"BT 1 0 0 1 112.0 -489.0 Tm (TELE TRANSFER CREDIT \\(Ref# ST251770083000010071427\\)) Tj ET\n"
+            b"BT 1 0 0 1 523.0 -489.0 Tm (928.00) Tj 1 0 0 1 548.0 -489.0 Tm (Cr) Tj ET\n"
+        )
+        synthetic_pdf = (
+            b"%PDF-1.4\n1 0 obj\n<< /Length "
+            + str(len(raw_stream)).encode()
+            + b" >>\nstream\n"
+            + raw_stream
+            + b"\nendstream\nendobj\n%%EOF"
+        )
+        parsed = parse_hdfc_cc_pdf_bytes(synthetic_pdf, filename="15-06-2025.PDF")
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.statement_date_iso, "2025-06-15")
+        self.assertEqual(parsed.opening_balance_minor, -49)
+        self.assertEqual(len(parsed.transactions), 2)
+
+        source = HdfcCreditCardPdfStatementSource(pdf_payloads=[("15-06-2025.PDF", synthetic_pdf)])
+        rows = source.parse()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(source.opening_balance_minor(), -49)
+        self.assertEqual(rows[0].debit_minor, 92800)
+        self.assertEqual(rows[0].closing_balance_minor, -92849)
+        self.assertEqual(rows[1].credit_minor, 92800)
+        self.assertEqual(rows[1].reference_no, "ST251770083000010071427")
+        self.assertEqual(source.closing_balance_minor(), -49)
+
+    def test_hdfc_cc_insta_alert_extractor(self) -> None:
+        extractor = HdfcCreditCardExtractor()
+        row = _make_row(
+            row_index=1,
+            date_iso="2025-05-17",
+            narration="KAKE DI HATTI BANGALORE",
+            debit_minor=92800,
+        )
+        msg = EmailMessagePayload(
+            uid="78860",
+            sent_utc=datetime(2025, 5, 17, 10, 15, 38, tzinfo=UTC),
+            date_iso="2025-05-17",
+            sender="HDFC Bank InstaAlerts <alerts@hdfcbank.net>",
+            subject="Alert : Update on your HDFC Bank Credit Card",
+            text_body=(
+                "Dear Card Member, Thank you for using your HDFC Bank Credit Card ending 3835 "
+                "for Rs 928.00 at KAKE DI HATTI on 17-05-2025 15:45:31. "
+                "After the above transaction, the total outstanding is Rs 929.00"
+            ),
+            attachments=(),
+        )
+        evs = extractor.extract([msg], [row])
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].timestamp_iso, "2025-05-17T10:15:31Z")
+        self.assertEqual(evs[0].payee, "Kake Di Hatti")
+        self.assertEqual(evs[0].payment_method, PaymentMethod.CREDIT_CARD)
+
+    def test_ref_linking_for_dcc_fcy_igst_and_membership_fees(self) -> None:
+        raw_stream = (
+            b"BT 1 0 0 1 20 -80.1 Tm (Statement Date:15/10/2026) Tj ET\n"
+            b"BT 1 0 0 1 271.5 -211.6 Tm (Previous Balance) Tj ET\n"
+            b"BT 1 0 0 1 533.1 -211.6 Tm (Total Dues) Tj ET\n"
+            b"BT 1 0 0 1 271.5 -236.6 Tm (0.00) Tj ET\n"
+            b"BT 1 0 0 1 341.1 -236.6 Tm (0.00) Tj ET\n"
+            b"BT 1 0 0 1 397.1 -236.6 Tm (4,047.20) Tj ET\n"
+            b"BT 1 0 0 1 477.1 -236.6 Tm (0.00) Tj ET\n"
+            b"BT 1 0 0 1 533.1 -236.6 Tm (4,047.20) Tj ET\n"
+            b"BT 1 0 0 1 248.5 -426.0 Tm (International Transactions) Tj ET\n"
+            b"BT 1 0 0 1 37.5 -460.0 Tm (28/09/2026) Tj ET\n"
+            b"BT 1 0 0 1 112.0 -460.0 Tm (KLOOK TRAVEL TECH \\(Ref# MT222630083000010256178\\)) Tj ET\n"
+            b"BT 1 0 0 1 523.0 -460.0 Tm (4,000.00) Tj ET\n"
+            b"BT 1 0 0 1 37.5 -472.0 Tm (28/09/2026) Tj ET\n"
+            b"BT 1 0 0 1 112.0 -472.0 Tm (1% on all DCC Transaction \\(Ref# MT222630083000010256178\\)) Tj ET\n"
+            b"BT 1 0 0 1 523.0 -472.0 Tm (40.00) Tj ET\n"
+            b"BT 1 0 0 1 37.5 -484.0 Tm (28/09/2026) Tj ET\n"
+            b"BT 1 0 0 1 112.0 -484.0 Tm (IGST-VPS2627 \\(Ref# MT222630083000010256178\\)) Tj ET\n"
+            b"BT 1 0 0 1 523.0 -484.0 Tm (7.20) Tj ET\n"
+        )
+        synthetic_pdf = (
+            b"%PDF-1.4\n1 0 obj\n<< /Length "
+            + str(len(raw_stream)).encode()
+            + b" >>\nstream\n"
+            + raw_stream
+            + b"\nendstream\nendobj\n%%EOF"
+        )
+        source = HdfcCreditCardPdfStatementSource(pdf_payloads=[("15-10-2026.PDF", synthetic_pdf)])
+        rows = list(source.parse())
+        self.assertEqual(len(rows), 3)
+        self.assertIn("[Parent: KLOOK TRAVEL TECH]", rows[1].narration)
+        self.assertIn("[Parent: 1% on all DCC Transaction - KLOOK TRAVEL TECH]", rows[2].narration)
+
+        rule_evs = DeclarativeRuleCollector().collect(
+            rows,
+            rows[0].statement_date,
+            rows[-1].statement_date,
+        )
+        by_idx = {e.row_index: e for e in rule_evs}
+        self.assertEqual(by_idx[2].category, "Charges, fees")
+        self.assertEqual(by_idx[2].payee, "HDFC")
+        self.assertEqual(by_idx[2].note, "DCC markup fee (KLOOK TRAVEL TECH)")
+        self.assertEqual(by_idx[3].category, "Charges, fees")
+        self.assertEqual(by_idx[3].payee, "HDFC")
+        self.assertEqual(
+            by_idx[3].note,
+            "IGST on 1% on all DCC Transaction - KLOOK TRAVEL TECH",
+        )
+
+        # Also verify Klook email extractor on ±1 day card swipe
+        travel_ext = TravelBookingExtractor()
+        klook_msg = EmailMessagePayload(
+            uid="99",
+            sent_utc=datetime(2026, 9, 27, 23, 50, tzinfo=UTC),
+            date_iso="2026-09-27",
+            sender="Klook <support@klook.com>",
+            subject="Your booking for Gardens by the Bay Ticket",
+            text_body="Booking confirmed",
+            attachments=(),
+        )
+        k_evs = travel_ext.extract([klook_msg], rows)
+        self.assertEqual(len(k_evs), 1)
+        self.assertEqual(k_evs[0].row_index, 1)
+        self.assertEqual(k_evs[0].payee, "Klook")
+        self.assertEqual(k_evs[0].category, "Culture, sport events")
+        self.assertEqual(k_evs[0].note, "Gardens by the Bay Ticket")
+
+    def test_sourdough_sink_idempotent_dedup_and_open_debt_reuse(self) -> None:
+        from expensieve.adapters.sinks.sourdough_sink import SourdoughLedgerSink
+
+        # Check existing non-transfer 1-to-1 and 1-to-N split matching
+        existing_raw = [
+            {
+                "_id": "Record_11111111-1111-4111-8111-111111111111",
+                "_rev": "1-a",
+                "reservedModelType": "Record",
+                "accountId": "-Account_cc",
+                "type": 1,
+                "amount": 92800,
+                "recordDate": "2025-05-17T00:00:00.000Z",
+                "transfer": False,
+                "note": "",
+                "payee": "",
+            },
+            {
+                "_id": "Record_22222222-2222-4222-8222-222222222222",
+                "_rev": "1-b",
+                "reservedModelType": "Record",
+                "accountId": "-Account_cc",
+                "type": 1,
+                "amount": 60000,
+                "recordDate": "2025-06-10T12:00:00.000Z",
+                "transfer": False,
+                "note": "Part 1",
+                "payee": "Amazon",
+            },
+            {
+                "_id": "Record_33333333-3333-4333-8333-333333333333",
+                "_rev": "1-c",
+                "reservedModelType": "Record",
+                "accountId": "-Account_cc",
+                "type": 1,
+                "amount": 40000,
+                "recordDate": "2025-06-10T12:00:00.000Z",
+                "transfer": False,
+                "note": "Part 2",
+                "payee": "Amazon",
+            },
+        ]
+        consumed: set[str] = set()
+        m_one, split_one = SourdoughLedgerSink._find_existing_non_transfer_match(
+            existing_raw_records=existing_raw,
+            consumed_record_ids=consumed,
+            account_id="-Account_cc",
+            record_type=1,
+            amount_minor=92800,
+            timestamp_iso="2025-05-17T10:15:31Z",
+        )
+        self.assertIsNotNone(m_one)
+        self.assertEqual(split_one, ())
+
+        m_split, split_ids = SourdoughLedgerSink._find_existing_non_transfer_match(
+            existing_raw_records=existing_raw,
+            consumed_record_ids=consumed,
+            account_id="-Account_cc",
+            record_type=1,
+            amount_minor=100000,
+            timestamp_iso="2025-06-10T15:00:00Z",
+        )
+        self.assertIsNone(m_split)
+        self.assertEqual(
+            set(split_ids),
+            {
+                "Record_22222222-2222-4222-8222-222222222222",
+                "Record_33333333-3333-4333-8333-333333333333",
+            },
+        )
+        self.assertIsNotNone(CanonicalTransaction)
+        self.assertIsNotNone(DebtLinkGroup)
 
 
 if __name__ == "__main__":

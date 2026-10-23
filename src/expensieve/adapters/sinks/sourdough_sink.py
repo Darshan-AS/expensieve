@@ -4,6 +4,7 @@ import sys
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ def _load_sourdough() -> Any:
     from sourdough.domain.builders import (
         build_record,
         build_transfer_pair,
+        normalize_timestamp_input,
         utc_now_iso,
     )
     from sourdough.domain.enums import PaymentType, RecordState, RecordType
@@ -39,6 +41,7 @@ def _load_sourdough() -> Any:
         "resolve_paths": resolve_paths,
         "build_record": build_record,
         "build_transfer_pair": build_transfer_pair,
+        "normalize_timestamp_input": normalize_timestamp_input,
         "utc_now_iso": utc_now_iso,
         "PaymentType": PaymentType,
         "RecordState": RecordState,
@@ -91,6 +94,63 @@ class SourdoughLedgerSink:
         live_minor = self._compute_live_account_balance(acc.doc_id)
         return (live_minor == expected_minor, live_minor)
 
+    @staticmethod
+    def _find_existing_non_transfer_match(
+        *,
+        existing_raw_records: Sequence[dict[str, Any]],
+        consumed_record_ids: set[str],
+        account_id: str,
+        record_type: int,
+        amount_minor: int,
+        timestamp_iso: str,
+    ) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+        """Find an existing 1-to-1 record or 1-to-N split group on account_id within ±1 day."""
+        try:
+            target_dt = date.fromisoformat(timestamp_iso[:10])
+        except ValueError:
+            return (None, ())
+
+        exact_candidates: list[tuple[int, dict[str, Any]]] = []
+        by_date: dict[str, list[dict[str, Any]]] = {}
+
+        for raw in existing_raw_records:
+            rec_id = str(raw.get("_id", ""))
+            if (
+                not rec_id
+                or rec_id in consumed_record_ids
+                or raw.get("_deleted")
+                or raw.get("reservedModelType") != "Record"
+                or raw.get("transfer")
+                or raw.get("accountId") != account_id
+                or int(raw.get("type", 1)) != record_type
+            ):
+                continue
+
+            rec_dt_str = str(raw.get("recordDate", ""))[:10]
+            try:
+                rec_dt = date.fromisoformat(rec_dt_str)
+            except ValueError:
+                continue
+
+            day_diff = abs((rec_dt - target_dt).days)
+            if day_diff > 1:
+                continue
+
+            rec_amt = int(raw.get("amount", 0))
+            if rec_amt == amount_minor:
+                exact_candidates.append((day_diff, raw))
+            by_date.setdefault(rec_dt_str, []).append(raw)
+
+        if exact_candidates:
+            exact_candidates.sort(key=lambda pair: (pair[0], str(pair[1].get("recordDate", ""))))
+            return (exact_candidates[0][1], ())
+
+        for group in by_date.values():
+            if len(group) >= 2 and sum(int(r.get("amount", 0)) for r in group) == amount_minor:
+                return (None, tuple(str(r["_id"]) for r in group))
+
+        return (None, ())
+
     def push_transactions(
         self,
         account_name: str,
@@ -142,45 +202,75 @@ class SourdoughLedgerSink:
         primary_acc = self._service.resolver.resolve_account(account_name)
         primary_curr = self._service.resolver.resolve_currency(primary_acc.currency_id)
         transfer_cat = self._service.resolver.resolve_transfer_category()
+        normalize_timestamp_input = self._sd["normalize_timestamp_input"]
 
-        # Map debt groups by row_index
+        existing_raw_records = self._service.client.all_docs_by_prefix("Record_")
+        consumed_record_ids: set[str] = set()
+        before_docs: list[dict[str, Any]] = []
+
+        # Map debt groups by row_index (reusing open -Debt_ docs when available)
         now_iso = str(utc_now_iso())
         row_to_debt_ref: dict[int, tuple[dict[str, Any], ...]] = {}
         debt_docs_to_put: list[dict[str, Any]] = []
         tx_by_row = {t.row_index: t for t in transactions}
 
         for dg in debt_groups:
-            debt_id = f"-Debt_{uuid.uuid4()}"
+            existing_debt = (
+                self._service.find_open_debt(dg.person_name)
+                if hasattr(self._service, "find_open_debt")
+                else None
+            )
+            if existing_debt is not None:
+                debt_id = str(existing_debt["_id"])
+                before_docs.append(dict(existing_debt))
+                updated_debt = dict(existing_debt)
+                updated_debt["paidBack"] = dg.paid_back
+                updated_debt["remainingAmount"] = (
+                    0 if dg.paid_back else max(0, int(existing_debt.get("remainingAmount", 0)))
+                )
+                updated_debt["reservedUpdatedAt"] = now_iso
+                debt_docs_to_put.append(updated_debt)
+            else:
+                debt_id = f"-Debt_{uuid.uuid4()}"
+                lent_dates = [
+                    tx_by_row[i].timestamp_iso for i in dg.lent_row_indices if i in tx_by_row
+                ]
+                repay_dates = [
+                    tx_by_row[i].timestamp_iso for i in dg.repayment_row_indices if i in tx_by_row
+                ]
+                debt_docs_to_put.append(
+                    {
+                        "_id": debt_id,
+                        "date": min(lent_dates) if lent_dates else now_iso,
+                        "note": dg.reason,
+                        "amount": dg.total_amount_minor,
+                        "useDebtAmount": False,
+                        "payBackTime": max(repay_dates) if repay_dates else now_iso,
+                        "forgiven": False,
+                        "reservedUpdatedAt": now_iso,
+                        "type": 0,
+                        "reservedOwnerId": self._service.replication.owner_id,
+                        "accountId": primary_acc.doc_id,
+                        "remainingAmount": 0 if dg.paid_back else dg.total_amount_minor,
+                        "reservedSource": "android",
+                        "reservedCreatedAt": now_iso,
+                        "reservedAuthorId": self._service.replication.owner_id,
+                        "name": dg.person_name,
+                        "reservedModelType": "Debt",
+                        "paidBack": dg.paid_back,
+                    }
+                )
             ref_tuple = ({"id": debt_id, "type": 1},)
             for r_idx in (*dg.lent_row_indices, *dg.repayment_row_indices):
                 row_to_debt_ref[r_idx] = ref_tuple
 
-            lent_dates = [tx_by_row[i].timestamp_iso for i in dg.lent_row_indices if i in tx_by_row]
-            repay_dates = [tx_by_row[i].timestamp_iso for i in dg.repayment_row_indices if i in tx_by_row]
-            debt_docs_to_put.append(
-                {
-                    "_id": debt_id,
-                    "date": min(lent_dates) if lent_dates else now_iso,
-                    "note": dg.reason,
-                    "amount": dg.total_amount_minor,
-                    "useDebtAmount": False,
-                    "payBackTime": max(repay_dates) if repay_dates else now_iso,
-                    "forgiven": False,
-                    "reservedUpdatedAt": now_iso,
-                    "type": 0,
-                    "reservedOwnerId": self._service.replication.owner_id,
-                    "accountId": primary_acc.doc_id,
-                    "remainingAmount": 0 if dg.paid_back else dg.total_amount_minor,
-                    "reservedSource": "android",
-                    "reservedCreatedAt": now_iso,
-                    "reservedAuthorId": self._service.replication.owner_id,
-                    "name": dg.person_name,
-                    "reservedModelType": "Debt",
-                    "paidBack": dg.paid_back,
-                }
-            )
-
         docs_to_put: list[dict[str, Any]] = list(debt_docs_to_put)
+        resolve_cat_fn = getattr(
+            self._service.resolver,
+            "resolve_leaf_category",
+            self._service.resolver.resolve_category,
+        )
+
         for txn in transactions:
             amt_major = (Decimal(txn.amount_minor) / Decimal(100)).quantize(Decimal("0.01"))
             p_type = _map_payment_type(txn.payment_method, PaymentType)
@@ -188,6 +278,14 @@ class SourdoughLedgerSink:
                 label_id_by_name[lbl.lower()] for lbl in txn.labels if lbl.lower() in label_id_by_name
             )
             debt_ref = row_to_debt_ref.get(txn.row_index, ())
+            if (
+                not debt_ref
+                and txn.category in ("Loan and Debts", "Lending, renting")
+                and hasattr(self._service, "find_open_debt")
+            ):
+                open_d = self._service.find_open_debt(txn.payee or txn.note)
+                if open_d is not None:
+                    debt_ref = ({"id": str(open_d["_id"]), "type": 1},)
 
             if txn.kind == TransactionKind.TRANSFER and txn.transfer_account:
                 target_acc = self._service.resolver.resolve_account(txn.transfer_account)
@@ -198,6 +296,51 @@ class SourdoughLedgerSink:
                 else:
                     from_acc, from_curr = primary_acc, primary_curr
                     to_acc, to_curr = target_acc, target_curr
+
+                unconsumed_raw = [
+                    r for r in existing_raw_records if str(r.get("_id", "")) not in consumed_record_ids
+                ]
+                matched_pair = (
+                    self._service.find_matching_transfer(
+                        from_account_id=from_acc.doc_id,
+                        to_account_id=to_acc.doc_id,
+                        amount_minor=txn.amount_minor,
+                        date_iso=txn.timestamp_iso,
+                        tolerance_days=2,
+                        raw_records=unconsumed_raw,
+                    )
+                    if hasattr(self._service, "find_matching_transfer")
+                    else None
+                )
+                if matched_pair is not None:
+                    out_raw, in_raw = matched_pair
+                    consumed_record_ids.add(str(out_raw["_id"]))
+                    consumed_record_ids.add(str(in_raw["_id"]))
+                    out_existing = RecordDocument.from_couch_dict(out_raw)
+                    in_existing = RecordDocument.from_couch_dict(in_raw)
+                    need_update = (
+                        (txn.note and not out_existing.note)
+                        or (txn.payee and not out_existing.payee)
+                        or (resolved_labels and not out_existing.labels)
+                    )
+                    if need_update:
+                        before_docs.extend([dict(out_raw), dict(in_raw)])
+                        upd_out = replace(
+                            out_existing,
+                            note=out_existing.note or txn.note,
+                            payee=out_existing.payee or txn.payee,
+                            labels=out_existing.labels or resolved_labels,
+                            reserved_updated_at=now_iso,
+                        ).to_couch_dict()
+                        upd_in = replace(
+                            in_existing,
+                            note=in_existing.note or txn.note,
+                            payee=in_existing.payee or txn.payee,
+                            labels=in_existing.labels or resolved_labels,
+                            reserved_updated_at=now_iso,
+                        ).to_couch_dict()
+                        docs_to_put.extend([upd_out, upd_in])
+                    continue
 
                 out_doc, in_doc = build_transfer_pair(
                     owner_id=self._service.replication.owner_id,
@@ -223,8 +366,47 @@ class SourdoughLedgerSink:
                 docs_to_put.append(d_out)
                 docs_to_put.append(d_in)
             else:
-                cat_doc = self._service.resolver.resolve_category(txn.category)
+                cat_doc = resolve_cat_fn(txn.category)
                 r_type = RecordType.INCOME if txn.signed_delta_minor > 0 else RecordType.EXPENSE
+
+                existing_match, split_ids = self._find_existing_non_transfer_match(
+                    existing_raw_records=existing_raw_records,
+                    consumed_record_ids=consumed_record_ids,
+                    account_id=primary_acc.doc_id,
+                    record_type=int(r_type),
+                    amount_minor=txn.amount_minor,
+                    timestamp_iso=txn.timestamp_iso,
+                )
+                if split_ids:
+                    consumed_record_ids.update(split_ids)
+                    continue
+                if existing_match is not None:
+                    consumed_record_ids.add(str(existing_match["_id"]))
+                    existing_rec = RecordDocument.from_couch_dict(existing_match)
+                    norm_ts = normalize_timestamp_input(txn.timestamp_iso)
+                    has_better_ts = (
+                        existing_rec.record_date.endswith("T00:00:00.000Z")
+                        and not norm_ts.endswith("T00:00:00.000Z")
+                    )
+                    need_rec_upd = (
+                        has_better_ts
+                        or (txn.note and not existing_rec.note)
+                        or (txn.payee and not existing_rec.payee)
+                        or (debt_ref and not existing_rec.ref_objects)
+                    )
+                    if need_rec_upd:
+                        before_docs.append(dict(existing_match))
+                        upd_rec = replace(
+                            existing_rec,
+                            record_date=norm_ts if has_better_ts else existing_rec.record_date,
+                            note=existing_rec.note or txn.note,
+                            payee=existing_rec.payee or txn.payee,
+                            ref_objects=existing_rec.ref_objects or debt_ref,
+                            reserved_updated_at=now_iso,
+                        ).to_couch_dict()
+                        docs_to_put.append(upd_rec)
+                    continue
+
                 rec_doc = build_record(
                     owner_id=self._service.replication.owner_id,
                     account=primary_acc,
@@ -262,7 +444,7 @@ class SourdoughLedgerSink:
 
         entry = self._service.journal.record(
             operation=f"EXPENSIEVE_SYNC_{account_name.upper()}",
-            before_docs=[],
+            before_docs=before_docs,
             after_docs=saved_after,
         )
         live_after = self._compute_live_account_balance(primary_acc.doc_id)

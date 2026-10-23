@@ -6,7 +6,7 @@ import imaplib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from email.header import decode_header
 from email.message import Message
@@ -14,10 +14,15 @@ from email.utils import parsedate_to_datetime
 from typing import Protocol
 
 from expensieve.adapters.collectors.pdf_text import extract_pdf_lines
+from expensieve.adapters.statements.hdfc_cc_pdf import (
+    DEFAULT_CC_PDF_PASSWORDS,
+    parse_hdfc_cc_pdf_bytes,
+)
 from expensieve.domain.gazetteer import Gazetteer
 from expensieve.domain.models import (
     EnrichmentEvidence,
     EvidencePriority,
+    PaymentMethod,
     StatementRow,
     TransactionKind,
 )
@@ -120,8 +125,9 @@ def _match_best_row(
     for row in candidates:
         if row.row_index in used_indices or row.amount_minor != amount_minor:
             continue
+        effective_max_diff = max(max_day_diff, 1) if not row.rrn_12 else max_day_diff
         diff = abs((row.statement_date - t_date).days)
-        if diff <= max_day_diff and diff < best_diff:
+        if diff <= effective_max_diff and diff < best_diff:
             best = row
             best_diff = diff
     return best
@@ -697,6 +703,10 @@ class TravelBookingExtractor:
                 ev = self._extract_makemytrip(msg, rows, used_rows)
                 if ev is not None:
                     evidences.append(ev)
+            elif "klook" in sender_l:
+                ev = self._extract_klook(msg, rows, used_rows)
+                if ev is not None:
+                    evidences.append(ev)
 
         return evidences
 
@@ -783,6 +793,38 @@ class TravelBookingExtractor:
                     category="Holiday, trips, hotels",
                     payee="MakeMyTrip",
                     note=f"{hotel_name} (Booking {booking_id})",
+                    needs_review=False,
+                )
+        return None
+
+    def _extract_klook(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        m_act = re.search(
+            r"(?:booking\s+for|confirmed[:\s]+)\s*([A-Za-z0-9 &'\-\(\)/]+)",
+            msg.subject,
+            re.IGNORECASE,
+        )
+        activity_name = m_act.group(1).strip() if m_act else msg.subject.strip()
+        klook_rows = [
+            r
+            for r in rows
+            if not r.is_credit and "KLOOK" in r.narration.upper() and r.row_index not in used_rows
+        ]
+        for row in klook_rows:
+            if abs((row.statement_date - date.fromisoformat(msg.date_iso)).days) <= 1:
+                used_rows.add(row.row_index)
+                return EnrichmentEvidence(
+                    source_name=f"{self.name}:klook",
+                    priority=EvidencePriority.INVOICE_PDF,
+                    confidence=0.96,
+                    row_index=row.row_index,
+                    category="Culture, sport events",
+                    payee="Klook",
+                    note=activity_name,
                     needs_review=False,
                 )
         return None
@@ -937,6 +979,140 @@ class InvestmentEmailExtractor:
         )
 
 
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+_CC_ALERT_PAT = re.compile(
+    r"using\s+your\s+HDFC\s+Bank\s+Credit\s+Card\s+ending\s+\d{4}\s+for\s+"
+    r"(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)\s+at\s+(.+?)\s+on\s+"
+    r"(\d{2}-\d{2}-\d{4})\s+(\d{2}:\d{2}:\d{2})",
+    re.IGNORECASE,
+)
+
+
+class HdfcCreditCardExtractor:
+    """Extracts exact timestamps from HDFC CC InstaAlerts and bill-payment transfers from encrypted CC PDFs."""
+
+    name = "gmail_hdfc_cc"
+    imap_search_query = "(from:alerts@hdfcbank.net OR from:alerts@hdfcbank.bank.in OR from:Emailstatements.cards@hdfcbank.net)"
+
+    def __init__(self, passwords: Sequence[str] = DEFAULT_CC_PDF_PASSWORDS) -> None:
+        self._passwords = tuple(passwords)
+
+    def extract(
+        self,
+        messages: Sequence[EmailMessagePayload],
+        rows: Sequence[StatementRow],
+    ) -> Sequence[EnrichmentEvidence]:
+        if not rows:
+            return ()
+
+        debit_rows = [r for r in rows if not r.is_credit]
+        used_alert_rows: set[int] = set()
+        used_bill_rows: set[int] = set()
+        evidences: list[EnrichmentEvidence] = []
+
+        for msg in messages:
+            # 1. Check HDFC Credit Card InstaAlert emails for exact second-level IST timestamps
+            m_alert = _CC_ALERT_PAT.search(msg.text_body)
+            if m_alert:
+                amt_minor = _parse_minor_amount(m_alert.group(1))
+                merchant_raw = " ".join(m_alert.group(2).split()).strip()
+                date_ddmmyyyy = m_alert.group(3)
+                time_hhmmss = m_alert.group(4)
+                if amt_minor is not None:
+                    try:
+                        dt_ist = datetime.strptime(
+                            f"{date_ddmmyyyy} {time_hhmmss}", "%d-%m-%Y %H:%M:%S"
+                        ).replace(tzinfo=_IST_TZ)
+                        dt_utc_iso = dt_ist.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        date_iso = dt_ist.strftime("%Y-%m-%d")
+                    except ValueError:
+                        dt_utc_iso = None
+                        date_iso = msg.date_iso
+
+                    matched = _match_best_row(
+                        debit_rows, date_iso, amt_minor, used_alert_rows, max_day_diff=1
+                    )
+                    if matched is not None and dt_utc_iso is not None:
+                        used_alert_rows.add(matched.row_index)
+                        payee_clean = self._normalize_cc_merchant(merchant_raw)
+                        evidences.append(
+                            EnrichmentEvidence(
+                                source_name=f"{self.name}:insta_alert",
+                                priority=EvidencePriority.INVOICE_PDF,
+                                confidence=0.98,
+                                row_index=matched.row_index,
+                                timestamp_iso=dt_utc_iso,
+                                payee=payee_clean,
+                                payment_method=PaymentMethod.CREDIT_CARD,
+                                needs_review=False,
+                            )
+                        )
+
+            # 2. Check encrypted HDFC Credit Card monthly PDF statements for bill-payment transfers
+            for fname, payload in msg.attachments:
+                if not fname.lower().endswith(".pdf"):
+                    continue
+                try:
+                    stmt = parse_hdfc_cc_pdf_bytes(payload, filename=fname, passwords=self._passwords)
+                except ValueError:
+                    continue
+                if stmt is None:
+                    continue
+                for txn_date_iso, narration, _ref_no, _debit_minor, credit_minor in stmt.transactions:
+                    if credit_minor <= 0:
+                        continue
+                    narr_u = narration.upper()
+                    if "TELE TRANSFER CREDIT" not in narr_u and "IMPS PMT" not in narr_u:
+                        continue
+                    # Match corresponding debit on the HDFC savings bank statement (e.g. CRED bill payment)
+                    bank_candidates = [
+                        r
+                        for r in debit_rows
+                        if "TELE TRANSFER CREDIT" not in r.narration.upper()
+                        and "IMPS PMT" not in r.narration.upper()
+                    ]
+                    matched_bank = _match_best_row(
+                        bank_candidates, txn_date_iso, credit_minor, used_bill_rows, max_day_diff=1
+                    )
+                    if matched_bank is not None:
+                        used_bill_rows.add(matched_bank.row_index)
+                        evidences.append(
+                            EnrichmentEvidence(
+                                source_name=f"{self.name}:statement_pdf",
+                                priority=EvidencePriority.INVOICE_PDF,
+                                confidence=0.99,
+                                row_index=matched_bank.row_index,
+                                kind=TransactionKind.TRANSFER,
+                                transfer_account="HDFC Credit Card",
+                                category="Transfer, withdraw",
+                                payee="CRED",
+                                note=f"Credit card bill payment (Statement {stmt.statement_date_iso})",
+                                needs_review=False,
+                            )
+                        )
+
+        return evidences
+
+    @staticmethod
+    def _normalize_cc_merchant(merchant_raw: str) -> str:
+        u = merchant_raw.upper()
+        if "REL RETAIL LTD DIGITAL" in u:
+            return "Reliance Digital"
+        if "KAKE DI HATTI" in u:
+            return "Kake Di Hatti"
+        if "REGENTA PLACE" in u:
+            return "Regenta Place"
+        if "BLOSSOM BOOK HOUSE" in u:
+            return "Blossom Book House"
+        if "MANIPAL HEALTH" in u:
+            return "Manipal Hospital"
+        if "STORIES BAR" in u:
+            return "Stories Bar and Kitchen"
+        if "NKP EMPIRE" in u:
+            return "Empire Restaurant"
+        return merchant_raw.title()
+
+
 DEFAULT_RECEIPT_EXTRACTORS: tuple[ReceiptExtractor, ...] = (
     SwiggyReceiptExtractor(),
     NammaYatriPdfExtractor(),
@@ -944,6 +1120,7 @@ DEFAULT_RECEIPT_EXTRACTORS: tuple[ReceiptExtractor, ...] = (
     AmazonEmailExtractor(),
     TravelBookingExtractor(),
     InvestmentEmailExtractor(),
+    HdfcCreditCardExtractor(),
 )
 
 
