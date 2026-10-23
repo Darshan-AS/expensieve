@@ -365,3 +365,97 @@ def extract_pdf_rows_by_y(
 def extract_pdf_text(data: bytes, passwords: Sequence[str] = ()) -> str:
     """Extract newline-delimited sorted text from a PDF byte payload."""
     return "\n".join(extract_pdf_lines(data, passwords=passwords))
+
+
+def parse_biff8_xls_rows(data: bytes) -> list[list[str | float]]:
+    """Extract 2D cell grid from an OLE2 BIFF8 (.xls) Workbook stream in pure Python."""
+    sst: list[str] = []
+    cells: dict[tuple[int, int], str | float] = {}
+    in_sheet = False
+
+    def _decode_rk(rk: int) -> float:
+        if rk & 0x02:
+            val = float(rk >> 2)
+        else:
+            raw_ieee = struct.pack("<Q", (rk & ~3) << 34)
+            val = struct.unpack("<d", raw_ieee)[0]
+        if rk & 0x01:
+            val /= 100.0
+        return round(val, 6)
+
+    bof_idx = data.find(b"\x09\x08\x10\x00\x00\x06")
+    if bof_idx == -1:
+        return []
+
+    pos = bof_idx
+    n = len(data)
+    while pos + 4 <= n:
+        rec_id, rec_len = struct.unpack_from("<HH", data, pos)
+        pos += 4
+        if pos + rec_len > n:
+            break
+        rec = data[pos : pos + rec_len]
+        pos += rec_len
+
+        if rec_id == 0x0809 and rec_len >= 6:
+            _, dt = struct.unpack_from("<HH", rec, 0)
+            in_sheet = dt == 0x0010
+        elif rec_id == 0x00FC and rec_len >= 8:  # SST (Shared String Table)
+            _, unique_strings = struct.unpack_from("<II", rec, 0)
+            s_pos = 8
+            for _ in range(unique_strings):
+                if s_pos + 3 > len(rec):
+                    break
+                char_count, flags = struct.unpack_from("<HB", rec, s_pos)
+                s_pos += 3
+                rt_runs = 0
+                ext_len = 0
+                if flags & 0x08 and s_pos + 2 <= len(rec):
+                    rt_runs = struct.unpack_from("<H", rec, s_pos)[0]
+                    s_pos += 2
+                if flags & 0x04 and s_pos + 4 <= len(rec):
+                    ext_len = struct.unpack_from("<I", rec, s_pos)[0]
+                    s_pos += 4
+                if flags & 0x01:
+                    byte_len = char_count * 2
+                    s = rec[s_pos : s_pos + byte_len].decode("utf-16le", errors="replace")
+                    s_pos += byte_len
+                else:
+                    s = rec[s_pos : s_pos + char_count].decode("latin1", errors="replace")
+                    s_pos += char_count
+                s_pos += rt_runs * 4 + ext_len
+                sst.append(s.strip())
+        elif in_sheet:
+            if rec_id == 0x00FD and rec_len >= 10:  # LABELSST
+                r, c, _, sst_idx = struct.unpack_from("<HHHI", rec, 0)
+                if 0 <= sst_idx < len(sst):
+                    cells[(r, c)] = sst[sst_idx]
+            elif rec_id == 0x0204 and rec_len >= 8:  # LABEL
+                r, c, _, slen = struct.unpack_from("<HHHH", rec, 0)
+                cells[(r, c)] = rec[8 : 8 + slen].decode("latin1", errors="replace").strip()
+            elif rec_id == 0x0203 and rec_len >= 14:  # NUMBER
+                r, c, _, val = struct.unpack_from("<HHHd", rec, 0)
+                cells[(r, c)] = round(val, 6)
+            elif rec_id == 0x027E and rec_len >= 10:  # RK
+                r, c, _, rk = struct.unpack_from("<HHHi", rec, 0)
+                cells[(r, c)] = _decode_rk(rk)
+            elif rec_id == 0x00BD and rec_len >= 6:  # MULRK
+                r, first_c = struct.unpack_from("<HH", rec, 0)
+                last_c = struct.unpack_from("<H", rec, rec_len - 2)[0]
+                offset = 4
+                for c in range(first_c, last_c + 1):
+                    if offset + 6 <= rec_len - 2:
+                        _, rk = struct.unpack_from("<Hi", rec, offset)
+                        cells[(r, c)] = _decode_rk(rk)
+                        offset += 6
+
+    if not cells:
+        return []
+    max_r = max(r for r, _ in cells)
+    max_c = max(c for _, c in cells)
+    rows: list[list[str | float]] = []
+    for r in range(max_r + 1):
+        row_vals = [cells.get((r, c), "") for c in range(max_c + 1)]
+        if any(v != "" for v in row_vals):
+            rows.append(row_vals)
+    return rows

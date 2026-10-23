@@ -330,8 +330,8 @@ model {
 
         extractor investmentExtractor 'InvestmentEmailExtractor' {
           #extractorTag
-          description 'Extracts IPO allotments (KFintech/MUFG) and Shriram Finance FD interest/maturity principal transfers to Investments'
-          technology 'Shriram Finance • KFintech • MUFG'
+          description 'Extracts Gullak gold certificates, INDmoney (US Stocks .xls, Indian Stocks Contract Note .pdf, MFs), CDSL/KFintech/MUFG IPOs & REITs, and Shriram Finance FDs'
+          technology 'Gullak • INDmoney • CDSL • KFintech • MUFG • Shriram'
         }
 
         extractor hdfcCcExtractor 'HdfcCreditCardExtractor' {

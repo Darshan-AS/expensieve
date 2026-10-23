@@ -13,7 +13,11 @@ from email.message import Message
 from email.utils import parsedate_to_datetime
 from typing import Protocol
 
-from expensieve.adapters.collectors.pdf_text import extract_pdf_lines
+from expensieve.adapters.collectors.pdf_text import (
+    extract_pdf_lines,
+    extract_pdf_text,
+    parse_biff8_xls_rows,
+)
 from expensieve.adapters.statements.hdfc_cc_pdf import (
     DEFAULT_CC_PDF_PASSWORDS,
     parse_hdfc_cc_pdf_bytes,
@@ -830,11 +834,30 @@ class TravelBookingExtractor:
         return None
 
 
+DEFAULT_INVESTMENT_PDF_PASSWORDS: tuple[str, ...] = (
+    "DTQPD8308L",
+    "dtqpd8308l",
+    *DEFAULT_CC_PDF_PASSWORDS,
+)
+
+
 class InvestmentEmailExtractor:
-    """Extracts IPO allotment details (KFintech, Link Intime/MUFG, Bigshare) and Shriram Finance FD payouts/refunds."""
+    """Extracts Gullak gold certificates, INDmoney (US Stocks, Indian Stocks, MFs), CDSL/KFintech/MUFG IPOs & REITs, and Shriram Finance FDs."""
 
     name = "gmail_investments"
-    imap_search_query = "(from:shriramfinance.in OR from:kfintech.com OR from:mpms.mufg.com)"
+    imap_search_query = (
+        "("
+        "(from:no-reply@gullak.money subject:(Investment Certificate)) "
+        "OR from:shriramfinance.in "
+        "OR (from:kfintech.com (Allotment OR Distribution OR Purchase)) "
+        "OR (from:mpms.mufg.com Allotment) "
+        "OR (from:services@cdslindia.co.in subject:(Transactions In Your Demat Account)) "
+        "OR (from:transactions.indmoney.com (subject:(Trade Report) OR subject:(Contract Note) OR subject:(INDstocks account funded) OR subject:(Units allotted)))"
+        ")"
+    )
+
+    def __init__(self, passwords: Sequence[str] = DEFAULT_INVESTMENT_PDF_PASSWORDS) -> None:
+        self._passwords = tuple(passwords)
 
     def extract(
         self,
@@ -845,20 +868,666 @@ class InvestmentEmailExtractor:
             return ()
 
         used_rows: set[int] = set()
+        used_ts_rows: set[int] = set()
+        used_cn_rows: set[int] = set()
+        used_cdsl_rows: set[int] = set()
+        used_us_rows: set[int] = set()
         evidences: list[EnrichmentEvidence] = []
 
         for msg in messages:
             sender_l = msg.sender.lower()
-            if "shriramfinance" in sender_l:
+            subj_l = msg.subject.lower()
+            if "gullak.money" in sender_l:
+                ev = self._extract_gullak(msg, rows, used_rows)
+                if ev is not None:
+                    evidences.append(ev)
+            elif "shriramfinance" in sender_l:
                 ev = self._extract_shriram(msg, rows, used_rows)
                 if ev is not None:
                     evidences.append(ev)
+            elif "transactions.indmoney.com" in sender_l:
+                if "trade report" in subj_l:
+                    evidences.extend(self._extract_indmoney_us_stocks(msg, rows, used_us_rows))
+                elif "contract note" in subj_l:
+                    ev = self._extract_indmoney_contract_note(msg, rows, used_cn_rows)
+                    if ev is not None:
+                        evidences.append(ev)
+                elif "indstocks account funded" in subj_l:
+                    ev = self._extract_indstocks_wallet_deposit(msg, rows, used_ts_rows)
+                    if ev is not None:
+                        evidences.append(ev)
+                elif "mutual fund" in subj_l:
+                    ev = self._extract_indmoney_mutual_fund(msg, rows, used_rows)
+                    if ev is not None:
+                        evidences.append(ev)
+            elif "services@cdslindia.co.in" in sender_l:
+                evidences.extend(self._extract_cdsl_demat(msg, rows, used_cdsl_rows, used_cn_rows))
             elif "kfintech" in sender_l or "mufg.com" in sender_l:
-                ev = self._extract_ipo_allotment(msg, rows, used_rows)
-                if ev is not None:
-                    evidences.append(ev)
+                if "distribution advice" in subj_l:
+                    ev = self._extract_reit_distribution(msg, rows, used_rows)
+                    if ev is not None:
+                        evidences.append(ev)
+                elif "purchase transaction" in subj_l:
+                    ev = self._extract_kfintech_mutual_fund(msg, rows, used_rows)
+                    if ev is not None:
+                        evidences.append(ev)
+                else:
+                    ev = self._extract_ipo_allotment(msg, rows, used_rows)
+                    if ev is not None:
+                        evidences.append(ev)
 
         return evidences
+
+    def _extract_gullak(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        m = re.search(
+            r"investment\s+of\s+([\d.]+)\s*grams?\s+of\s+gold\s+in\s+\*?([A-Za-z0-9+ ]+?)\*?\s+done\s+on\s+(\d{2}/\d{2}/\d{4})",
+            msg.text_body,
+            re.IGNORECASE,
+        )
+        if not m:
+            return None
+        grams_str = m.group(1).strip()
+        product = m.group(2).strip()
+        date_ddmmyyyy = m.group(3).strip()
+        try:
+            target_date = datetime.strptime(date_ddmmyyyy, "%d/%m/%Y").date()
+        except ValueError:
+            target_date = date.fromisoformat(msg.date_iso)
+
+        candidates = [
+            r
+            for r in rows
+            if not r.is_credit
+            and r.row_index not in used_rows
+            and ("INTERSCALE" in r.narration.upper() or "GULLAK" in r.narration.upper())
+            and abs((r.statement_date - target_date).days) <= 1
+        ]
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda r: abs((r.statement_date - target_date).days))
+        matched = candidates[0]
+        used_rows.add(matched.row_index)
+        ts_iso = msg.sent_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return EnrichmentEvidence(
+            source_name=f"{self.name}:gullak",
+            priority=EvidencePriority.INVOICE_PDF,
+            confidence=0.99,
+            row_index=matched.row_index,
+            timestamp_iso=ts_iso,
+            kind=TransactionKind.TRANSFER,
+            transfer_account="Investments",
+            category="Transfer, withdraw",
+            payee="Gullak",
+            note=f"Gullak {product} purchase: {grams_str}g gold (via CCAF Interscale Technologies)",
+            needs_review=False,
+        )
+
+    def _extract_indmoney_us_stocks(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_us_rows: set[int],
+    ) -> list[EnrichmentEvidence]:
+        remit_rows = [
+            r
+            for r in rows
+            if not r.is_credit
+            and r.row_index not in used_us_rows
+            and "RFX" in r.narration.upper()
+            and "BTT" in r.narration.upper()
+        ]
+        if not remit_rows:
+            return []
+
+        trades: list[tuple[date, str]] = []
+        for fname, payload in msg.attachments:
+            if not fname.lower().endswith(".xls"):
+                continue
+            grid = parse_biff8_xls_rows(payload)
+            header_idx = -1
+            for idx, r_vals in enumerate(grid):
+                if len(r_vals) >= 10 and str(r_vals[0]).strip() == "Stock Name":
+                    header_idx = idx
+                    break
+            if header_idx == -1:
+                continue
+
+            for r_vals in grid[header_idx + 1 :]:
+                if len(r_vals) < 11:
+                    continue
+                stock_name = str(r_vals[0]).strip()
+                symbol = str(r_vals[1]).strip()
+                exec_time_str = str(r_vals[3]).strip()
+                tx_type = str(r_vals[5]).strip().upper()
+                if not stock_name or not symbol or tx_type not in ("BUY", "SELL"):
+                    continue
+                date_part = exec_time_str.split(",")[0].strip()
+                try:
+                    trade_dt = datetime.strptime(date_part, "%d %b %Y").date()
+                except ValueError:
+                    continue
+                try:
+                    qty = float(r_vals[7])
+                    price = float(r_vals[8])
+                    order_amt = float(r_vals[9])
+                    fee = float(r_vals[10])
+                except TypeError, ValueError:
+                    continue
+
+                clean_stock = re.sub(
+                    r"\s+(?:Class\s+[A-Z]\s+)?Common\s+Stock$", "", stock_name, flags=re.IGNORECASE
+                ).strip()
+                qty_s = f"{qty:g}"
+                price_s = f"{price:.4f}".rstrip("0").rstrip(".")
+                if "." not in price_s:
+                    price_s = f"{price:.2f}"
+                line = (
+                    f"- {clean_stock} ({symbol}): {qty_s} qty @ ${price_s} = "
+                    f"${order_amt:,.2f} + ${fee:,.2f} fee ({date_part})"
+                )
+                trades.append((trade_dt, line))
+
+        if not trades:
+            return []
+
+        remit_rows.sort(key=lambda r: r.statement_date)
+        evidences: list[EnrichmentEvidence] = []
+        for idx, r_row in enumerate(remit_rows):
+            next_dt = (
+                remit_rows[idx + 1].statement_date
+                if idx + 1 < len(remit_rows)
+                else r_row.statement_date + timedelta(days=45)
+            )
+            window_end = min(next_dt, r_row.statement_date + timedelta(days=45))
+            matched_lines = [line for t_dt, line in trades if r_row.statement_date <= t_dt < window_end]
+            if not matched_lines:
+                continue
+
+            m_rfx = re.search(
+                r"RFX\s+([A-Z0-9]+BTT[A-Z0-9]+)\s+USD([\d.]+)@([\d.]+)",
+                r_row.narration,
+                re.IGNORECASE,
+            )
+            if m_rfx:
+                rfx_ref = m_rfx.group(1).upper()
+                usd_val = float(m_rfx.group(2))
+                rate_str = m_rfx.group(3)
+                header = f"US Stocks in IndMoney: INR to USD (${usd_val:,.2f} at {rate_str} INR/USD, RFX {rfx_ref})"
+            else:
+                header = "US Stocks in IndMoney"
+
+            used_us_rows.add(r_row.row_index)
+            evidences.append(
+                EnrichmentEvidence(
+                    source_name=f"{self.name}:indmoney_us_stocks",
+                    priority=EvidencePriority.INVOICE_PDF,
+                    confidence=0.99,
+                    row_index=r_row.row_index,
+                    kind=TransactionKind.TRANSFER,
+                    transfer_account="Investments",
+                    category="Transfer, withdraw",
+                    payee="IndMoney",
+                    note=f"{header} // " + " // ".join(matched_lines),
+                    needs_review=False,
+                )
+            )
+        return evidences
+
+    def _extract_indstocks_wallet_deposit(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_ts_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        clean_body = " ".join(re.sub(r"\{[^}]*\}", " ", msg.text_body).split())
+        m_amt = re.search(r"deposit\s+of\s+₹\s*([\d,]+(?:\.\d{1,2})?)", clean_body, re.IGNORECASE)
+        if not m_amt:
+            m_amt = re.search(r"funded\s+with\s+₹\s*([\d,]+(?:\.\d{1,2})?)", msg.subject, re.IGNORECASE)
+        if not m_amt:
+            return None
+        amt_minor = _parse_minor_amount(m_amt.group(1))
+        if amt_minor is None:
+            return None
+
+        ts_iso: str | None = None
+        m_dt = re.search(
+            r"Date\s+([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})\s+(\d{1,2}:\d{2}\s*[AP]M)",
+            clean_body,
+            re.IGNORECASE,
+        )
+        if m_dt:
+            raw_dt = f"{m_dt.group(1)} {m_dt.group(2).upper().replace(' ', '')}"
+            try:
+                dt_ist = datetime.strptime(raw_dt, "%b %d, %Y %I:%M%p").replace(tzinfo=_IST_TZ)
+                ts_iso = dt_ist.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                ts_iso = None
+
+        candidates = [r for r in rows if not r.is_credit and "INDSTOCKS" in r.narration.upper()]
+        matched = _match_best_row(candidates, msg.date_iso, amt_minor, used_ts_rows, max_day_diff=1)
+        if matched is None:
+            return None
+
+        used_ts_rows.add(matched.row_index)
+        return EnrichmentEvidence(
+            source_name=f"{self.name}:indstocks_deposit",
+            priority=EvidencePriority.INVOICE_PDF,
+            confidence=0.96,
+            row_index=matched.row_index,
+            timestamp_iso=ts_iso or msg.sent_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            kind=TransactionKind.TRANSFER,
+            transfer_account="Investments",
+            category="Transfer, withdraw",
+            payee="IndMoney",
+            note="Indian Stocks in IndMoney: INDstocks wallet deposit",
+            needs_review=False,
+        )
+
+    def _extract_indmoney_contract_note(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_cn_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        m_td = re.search(r"trades\s+on\s+(\d{2}/\d{2}/\d{4})", msg.subject, re.IGNORECASE)
+        if m_td:
+            try:
+                trade_date_iso = datetime.strptime(m_td.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+            except ValueError:
+                trade_date_iso = msg.date_iso
+        else:
+            trade_date_iso = msg.date_iso
+
+        for fname, payload in msg.attachments:
+            if not fname.lower().endswith(".pdf"):
+                continue
+            try:
+                pdf_text = extract_pdf_text(payload, passwords=self._passwords)
+            except ValueError:
+                continue
+            if not pdf_text:
+                continue
+
+            m_net = re.search(
+                r"Net\s+Amount\s+Receivable/Payable\s+By\s+Client\s+([\d,]+(?:\.\d{2})?)\s*DR",
+                pdf_text,
+                re.IGNORECASE,
+            )
+            m_ob = re.search(
+                r"Pay\s+In/Pay\s+Out\s+Obligation\s+([\d,]+(?:\.\d{2})?)\s*DR",
+                pdf_text,
+                re.IGNORECASE,
+            )
+            m_sec = re.search(
+                r"(IN[EF][A-Z0-9]{9})\s+(\d+)\s+([\d.]+)\s+[\d.\s]+?\s+[\d.]+\s+([\d.]+)\s+\d+\s+-?[\d.]+\s+([A-Z0-9 &\-/]+?)\s+ISIN",
+                pdf_text,
+                re.DOTALL,
+            )
+            if not (m_net and m_sec):
+                continue
+
+            net_payable = Decimal(m_net.group(1).replace(",", ""))
+            obligation = Decimal(m_ob.group(1).replace(",", "")) if m_ob else Decimal(m_sec.group(4))
+            charges = net_payable - obligation
+            qty_str = m_sec.group(2).strip()
+            wap_str = m_sec.group(3).strip()
+            sec_raw = " ".join(m_sec.group(5).split()).split("/")[0].strip().title()
+            sec_clean = sec_raw.replace("Etf", "ETF").replace("Bees", "BeES")
+
+            t_date = date.fromisoformat(trade_date_iso)
+            candidates = [
+                r
+                for r in rows
+                if not r.is_credit
+                and r.row_index not in used_cn_rows
+                and "INDSTOCKS" in r.narration.upper()
+                and "ICCL" not in r.narration.upper()
+                and abs((r.statement_date - t_date).days) <= 2
+            ]
+            if not candidates:
+                continue
+
+            candidates.sort(key=lambda r: abs((r.statement_date - t_date).days))
+            matched = candidates[0]
+            used_cn_rows.add(matched.row_index)
+            dt_human = t_date.strftime("%d %b %Y")
+            note = (
+                f"Indian Stocks in IndMoney: INDstocks wallet deposit // "
+                f"- {sec_clean}: {qty_str} qty @ ₹{wap_str} = ₹{obligation:,.2f} ({dt_human}) // "
+                f"- Brokerage & charges: ₹{charges:,.2f}"
+            )
+            return EnrichmentEvidence(
+                source_name=f"{self.name}:indmoney_contract_note",
+                priority=EvidencePriority.INVOICE_PDF,
+                confidence=0.99,
+                row_index=matched.row_index,
+                kind=TransactionKind.TRANSFER,
+                transfer_account="Investments",
+                category="Transfer, withdraw",
+                payee="IndMoney",
+                note=note,
+                needs_review=False,
+            )
+        return None
+
+    def _extract_indmoney_mutual_fund(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        clean_body = " ".join(re.sub(r"\{[^}]*\}", " ", msg.text_body).split())
+        m_fund = re.search(
+            r"Fund:\s*(.+?)\s+Folio\s+Number\s+(\S+)\s+Order\s+ID\s+(\S+).*?"
+            r"Units\s+allot+ed\s+([\d.]+)\s+Allotted\s+NAV\s+([\d.]+)\s+Order\s+date\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+            clean_body,
+            re.IGNORECASE,
+        )
+        if not m_fund:
+            return None
+
+        fund_name = m_fund.group(1).strip()
+        folio = m_fund.group(2).strip()
+        units_str = m_fund.group(4).strip()
+        nav_str = m_fund.group(5).strip()
+        order_date_str = m_fund.group(6).strip()
+        try:
+            order_dt = datetime.strptime(order_date_str, "%d %b %Y").date()
+        except ValueError:
+            order_dt = date.fromisoformat(msg.date_iso)
+
+        try:
+            net_val = Decimal(units_str) * Decimal(nav_str)
+            # Mutual fund purchases carry 0.005% statutory stamp duty
+            gross_minor = int(((net_val / Decimal("0.99995")).quantize(Decimal(1))) * 100)
+        except InvalidOperation:
+            return None
+
+        candidates = [
+            r
+            for r in rows
+            if not r.is_credit
+            and r.row_index not in used_rows
+            and abs((r.statement_date - order_dt).days) <= 2
+            and abs(r.amount_minor - gross_minor) <= 20000  # within ₹200 rounding tolerance
+        ]
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda r: (abs(r.amount_minor - gross_minor), abs((r.statement_date - order_dt).days))
+        )
+        matched = candidates[0]
+        used_rows.add(matched.row_index)
+        return EnrichmentEvidence(
+            source_name=f"{self.name}:indmoney_mf",
+            priority=EvidencePriority.INVOICE_PDF,
+            confidence=0.99,
+            row_index=matched.row_index,
+            kind=TransactionKind.TRANSFER,
+            transfer_account="Investments",
+            category="Transfer, withdraw",
+            payee="IndMoney",
+            note=f"Mutual Fund in IndMoney: {fund_name} ({units_str} units @ ₹{nav_str} NAV, Folio {folio})",
+            needs_review=False,
+        )
+
+    def _extract_kfintech_mutual_fund(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        body = " ".join(msg.text_body.split())
+        m_quant = re.search(
+            r"Scheme\s+Details\s+(.+?)\s+NAV\s+Date\s+(\d{2}/\d{2}/\d{4})\s+"
+            r"NAV\s*\(Rs\.\s*per\s*unit\)\s*([\d.]+)\s+Units\s*\(Nos\.\)\s*Allotted\s*([\d.]+)\s+"
+            r"Amount\s*\(Rs\.\)\s*/\s*units\s*([\d,]+(?:\.\d{1,2})?)",
+            body,
+            re.IGNORECASE,
+        )
+        if m_quant:
+            scheme = m_quant.group(1).strip()
+            if scheme.lower().startswith("quant "):
+                scheme = "Quant " + scheme[6:]
+            nav_date_str = m_quant.group(2).strip()
+            nav_str = m_quant.group(3).strip()
+            units_str = m_quant.group(4).strip()
+            net_amt_str = m_quant.group(5).replace(",", "").strip()
+            try:
+                t_dt = datetime.strptime(nav_date_str, "%d/%m/%Y").date()
+                net_dec = Decimal(net_amt_str)
+                gross_minor = int(((net_dec / Decimal("0.99995")).quantize(Decimal(1))) * 100)
+            except ValueError, InvalidOperation:
+                return None
+
+            candidates = [
+                r
+                for r in rows
+                if not r.is_credit
+                and r.row_index not in used_rows
+                and abs((r.statement_date - t_dt).days) <= 2
+                and (r.amount_minor == int(net_dec * 100) or abs(r.amount_minor - gross_minor) <= 2000)
+            ]
+            if candidates:
+                matched = candidates[0]
+                used_rows.add(matched.row_index)
+                return EnrichmentEvidence(
+                    source_name=f"{self.name}:kfintech_mf",
+                    priority=EvidencePriority.INVOICE_PDF,
+                    confidence=0.98,
+                    row_index=matched.row_index,
+                    kind=TransactionKind.TRANSFER,
+                    transfer_account="Investments",
+                    category="Transfer, withdraw",
+                    payee="IndMoney",
+                    note=f"Mutual Fund in IndMoney: {scheme} ({units_str} units @ ₹{nav_str} NAV)",
+                    needs_review=False,
+                )
+
+        m_generic = re.search(
+            r"purchase\s+in\s+(.+?)\s+We\s+confirm\s+having\s+processed.*?transaction\s+date\s+(\d{2}/\d{2}/\d{4}).*?"
+            r"Folio\s+Number\s*:\s*(\S+)\s+Amount\s*\(Rs\.\)\s*:\s*([\d,]+(?:\.\d{1,2})?)",
+            body,
+            re.IGNORECASE,
+        )
+        if m_generic:
+            scheme = m_generic.group(1).strip()
+            tx_date_str = m_generic.group(2).strip()
+            folio = m_generic.group(3).strip()
+            net_amt_str = m_generic.group(4).replace(",", "").strip()
+            try:
+                t_dt = datetime.strptime(tx_date_str, "%d/%m/%Y").date()
+                net_dec = Decimal(net_amt_str)
+                gross_minor = int(((net_dec / Decimal("0.99995")).quantize(Decimal(1))) * 100)
+            except ValueError, InvalidOperation:
+                return None
+            candidates = [
+                r
+                for r in rows
+                if not r.is_credit
+                and r.row_index not in used_rows
+                and abs((r.statement_date - t_dt).days) <= 2
+                and (r.amount_minor == int(net_dec * 100) or abs(r.amount_minor - gross_minor) <= 2000)
+            ]
+            if candidates:
+                matched = candidates[0]
+                used_rows.add(matched.row_index)
+                return EnrichmentEvidence(
+                    source_name=f"{self.name}:kfintech_mf",
+                    priority=EvidencePriority.INVOICE_PDF,
+                    confidence=0.98,
+                    row_index=matched.row_index,
+                    kind=TransactionKind.TRANSFER,
+                    transfer_account="Investments",
+                    category="Transfer, withdraw",
+                    payee="IndMoney",
+                    note=f"Mutual Fund in IndMoney: {scheme} (Folio {folio})",
+                    needs_review=False,
+                )
+        return None
+
+    def _extract_cdsl_demat(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+        used_cn_rows: set[int],
+    ) -> list[EnrichmentEvidence]:
+        body = " ".join(msg.text_body.split())
+        evidences: list[EnrichmentEvidence] = []
+        for m in re.finditer(
+            r"\d+\s+([A-Z0-9 #&\-\./\(\)]+?)\s+(IN[EF][A-Z0-9]{9})\s+([\d.]+)\s+(Credit|Debit)\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})",
+            body,
+            re.IGNORECASE,
+        ):
+            raw_company = re.sub(
+                r"^.*?Date\s+and\s+Time\s+\d+\s+",
+                "",
+                m.group(1),
+                flags=re.IGNORECASE,
+            ).strip()
+            qty_dec = Decimal(m.group(3))
+            direction = m.group(4).upper()
+            dt_str = m.group(5)
+            if direction != "CREDIT" or qty_dec <= 0:
+                continue
+            try:
+                credit_dt = datetime.strptime(dt_str, "%d/%m/%Y").date()
+            except ValueError:
+                continue
+
+            qty_int = int(qty_dec)
+            company_part = raw_company.split("#")[0].strip().title()
+            sub_part = raw_company.split("#")[1].strip().title() if "#" in raw_company else ""
+
+            # 1. Check if this CDSL credit corresponds to an ASBA IPO debit row on the same date (±1 day)
+            ipo_candidates = [
+                r
+                for r in rows
+                if not r.is_credit
+                and r.row_index not in used_rows
+                and (r.narration.endswith("-50200021339924") or "IPO" in r.narration.upper())
+                and abs((r.statement_date - credit_dt).days) <= 1
+                and (r.amount_minor % (qty_int * 100) == 0)
+            ]
+            if ipo_candidates:
+                matched = ipo_candidates[0]
+                used_rows.add(matched.row_index)
+                price_inr = (matched.amount_minor // 100) // qty_int
+                m_appl = re.search(r"UPI-\d+-[A-Z]*(\d{7,12})-50200021339924", matched.narration)
+                appl_suffix = f", Appl {m_appl.group(1)}" if m_appl else ""
+                unit_label = "units" if "REIT" in raw_company.upper() else "shares"
+                prefix = "REIT IPO in IndMoney" if "REIT" in raw_company.upper() else "IPO in IndMoney"
+                evidences.append(
+                    EnrichmentEvidence(
+                        source_name=f"{self.name}:cdsl_demat",
+                        priority=EvidencePriority.INVOICE_PDF,
+                        confidence=0.98,
+                        row_index=matched.row_index,
+                        kind=TransactionKind.TRANSFER,
+                        transfer_account="Investments",
+                        category="Transfer, withdraw",
+                        payee="IndMoney",
+                        note=f"{prefix}: {company_part} ({qty_int} {unit_label} @ ₹{price_inr:,}{appl_suffix})",
+                        needs_review=False,
+                    )
+                )
+                continue
+
+            # 2. Check if this CDSL credit corresponds to an INDstocks wallet deposit within 0..2 days
+            stock_candidates = [
+                r
+                for r in rows
+                if not r.is_credit
+                and r.row_index not in used_cn_rows
+                and "INDSTOCKS" in r.narration.upper()
+                and "ICCL" not in r.narration.upper()
+                and 0 <= (credit_dt - r.statement_date).days <= 2
+            ]
+            if stock_candidates:
+                matched = stock_candidates[0]
+                sec_display = sub_part.split("-")[-1].strip() if sub_part else company_part
+                sec_display = sec_display.replace("Etf", "ETF").replace("Bees", "BeES")
+                evidences.append(
+                    EnrichmentEvidence(
+                        source_name=f"{self.name}:cdsl_demat",
+                        priority=EvidencePriority.INVOICE_PDF,
+                        confidence=0.97,
+                        row_index=matched.row_index,
+                        kind=TransactionKind.TRANSFER,
+                        transfer_account="Investments",
+                        category="Transfer, withdraw",
+                        payee="IndMoney",
+                        note=f"Indian Stocks in IndMoney: INDstocks wallet deposit ({qty_int}x {sec_display})",
+                        needs_review=False,
+                    )
+                )
+        return evidences
+
+    def _extract_reit_distribution(
+        self,
+        msg: EmailMessagePayload,
+        rows: Sequence[StatementRow],
+        used_rows: set[int],
+    ) -> EnrichmentEvidence | None:
+        body = " ".join(msg.text_body.split())
+        m_qtr = re.search(r"Cashflow\s+Distribution\s+pertaining\s+to\s+(Q\d\s*FY\d{2})", body, re.IGNORECASE)
+        m_units = re.search(r"Units\s+held\s+as\s+on\s+the\s+Record\s+Date\s+(\d+)", body, re.IGNORECASE)
+        m_dt = re.search(r"Date\s+of\s+Credit\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})", body, re.IGNORECASE)
+        m_net = re.search(
+            r"Net\s+Distribution\s*\(B-D\)\s*[?₹Rs.\s]*([\d,]+(?:\.\d{2})?)\s+[?₹Rs.\s]*([\d,]+(?:\.\d{2})?)\s+[?₹Rs.\s]*([\d,]+(?:\.\d{2})?)",
+            body,
+            re.IGNORECASE,
+        )
+        m_tds = re.search(r"TDS\s+Amount\s*[?₹Rs.\s]*([\d,]+(?:\.\d{2})?)", body, re.IGNORECASE)
+        if not m_net:
+            return None
+
+        net_interest = m_net.group(1)
+        net_dividend = m_net.group(2)
+        total_minor = _parse_minor_amount(m_net.group(3))
+        if total_minor is None:
+            return None
+
+        target_date_iso = msg.date_iso
+        if m_dt:
+            try:
+                target_date_iso = datetime.strptime(m_dt.group(1).strip(), "%B %d, %Y").strftime("%Y-%m-%d")
+            except ValueError:
+                target_date_iso = msg.date_iso
+
+        credit_rows = [r for r in rows if r.is_credit]
+        matched = _match_best_row(credit_rows, target_date_iso, total_minor, used_rows, max_day_diff=2)
+        if matched is None:
+            return None
+
+        used_rows.add(matched.row_index)
+        reit_name = msg.subject.split("||")[0].strip().title().replace("Reit", "REIT")
+        qtr_str = f" {m_qtr.group(1).strip()}" if m_qtr else ""
+        units_str = f"{m_units.group(1)} units: " if m_units else ""
+        tds_str = f" after ₹{m_tds.group(1)} TDS" if m_tds else ""
+        note = (
+            f"REIT Distribution in IndMoney: {reit_name}{qtr_str} "
+            f"({units_str}₹{net_dividend} dividend + ₹{net_interest} net interest{tds_str})"
+        )
+        return EnrichmentEvidence(
+            source_name=f"{self.name}:reit_distribution",
+            priority=EvidencePriority.INVOICE_PDF,
+            confidence=0.99,
+            row_index=matched.row_index,
+            kind=TransactionKind.INCOME,
+            category="Interests, dividends",
+            payee="IndMoney",
+            note=note,
+            needs_review=False,
+        )
 
     def _extract_shriram(
         self,
@@ -930,12 +1599,12 @@ class InvestmentEmailExtractor:
         body = msg.text_body
         m_app = re.search(r"Bid\s+cum\s+Application\s+Form\s+No\.\s*(\d+)", body, re.IGNORECASE)
         m_price = re.search(
-            r"(?:Issue|Offer)\s+Price\s+per\s+(?:Security|Equity\s+Share)\s*\(Rs\.\)\s*([\d,]+)",
+            r"(?:Issue|Offer)\s+Price\s+per\s+(?:Security|Equity\s+Share|Unit)\s*\(Rs\.\)\s*([\d,]+)",
             body,
             re.IGNORECASE,
         )
         m_allotted = re.search(
-            r"(?:Shares|Number\s+of\s+Equity\s+Shares)\s+Allotted\s*(\d+)",
+            r"(?:Shares|Units|Number\s+of\s+(?:Equity\s+)?(?:Shares|Units))\s+Allotted\s*(\d+)",
             body,
             re.IGNORECASE,
         )
@@ -944,20 +1613,31 @@ class InvestmentEmailExtractor:
             body,
             re.IGNORECASE,
         )
-        if not (m_app and m_price and m_allotted and m_adj):
+        if not (m_app and m_price and m_allotted):
             return None
 
         allotted = int(m_allotted.group(1))
         if allotted <= 0:
             return None
 
-        amt_minor = _parse_minor_amount(m_adj.group(1))
+        price_str = m_price.group(1).strip()
+        price_minor = _parse_minor_amount(price_str)
+        if m_adj:
+            amt_minor = _parse_minor_amount(m_adj.group(1))
+        elif price_minor is not None:
+            amt_minor = allotted * price_minor
+        else:
+            amt_minor = None
+
         if amt_minor is None or amt_minor <= 0:
             return None
 
         app_no = m_app.group(1).strip()
-        price_str = m_price.group(1).strip()
-        company = re.sub(r"\s*-\s*IPO.*$", "", msg.subject, flags=re.IGNORECASE).strip().title()
+        clean_subj = " ".join(msg.subject.split())
+        is_reit = "REIT" in clean_subj.upper()
+        company = re.sub(r"\s*-\s*(?:IPO|REIT).*$", "", clean_subj, flags=re.IGNORECASE).strip().title()
+        if is_reit and "REIT" not in company.upper():
+            company = f"{company} REIT"
 
         debit_rows = [r for r in rows if not r.is_credit]
         matched = _match_best_row(debit_rows, msg.date_iso, amt_minor, used_rows, max_day_diff=3)
@@ -965,6 +1645,8 @@ class InvestmentEmailExtractor:
             return None
 
         used_rows.add(matched.row_index)
+        prefix = "REIT IPO in IndMoney" if is_reit else "IPO in IndMoney"
+        unit_word = "units" if is_reit else "shares"
         return EnrichmentEvidence(
             source_name=f"{self.name}:ipo",
             priority=EvidencePriority.INVOICE_PDF,
@@ -974,7 +1656,7 @@ class InvestmentEmailExtractor:
             transfer_account="Investments",
             category="Transfer, withdraw",
             payee="IndMoney",
-            note=f"IPO in IndMoney: {company} ({allotted} shares @ ₹{price_str}, Appl {app_no})",
+            note=f"{prefix}: {company} ({allotted} {unit_word} @ ₹{price_str}, Appl {app_no})",
             needs_review=False,
         )
 
@@ -1163,7 +1845,7 @@ class GmailImapCollector:
                 typ, data = mail.uid("SEARCH", "X-GM-RAW", raw_q)
                 if typ != "OK" or not data or not data[0]:
                     continue
-                uids = data[0].split()[-50:]
+                uids = data[0].split()[-120:]
                 msgs: list[EmailMessagePayload] = []
                 for uid_bytes in uids:
                     _, msg_data = mail.uid("FETCH", uid_bytes, "(RFC822)")

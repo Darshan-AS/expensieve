@@ -281,6 +281,68 @@ class DeclarativeRuleCollector:
                 needs_review=False,
             )
 
+        if "GULLAK" in narr_u or "INTERSCALE" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=pay_method,
+                category="Transfer, withdraw",
+                payee="Gullak",
+                note="Gullak Gold purchase",
+                transfer_account="Investments",
+                needs_review=False,
+            )
+
+        if "INDSTOCKS.ICCL" in narr_u or "RAZPBSE" in narr_u or ("INDSTOCKS" in narr_u and "MF" in note_u):
+            custom_note = "" if note_u in GENERIC_UPI_NOTES else humanize_upi_note(upi.note)
+            mf_note = f"Mutual Fund in IndMoney ({custom_note})" if custom_note else "Mutual Fund in IndMoney"
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=pay_method,
+                category="Transfer, withdraw",
+                payee="IndMoney",
+                note=mf_note,
+                transfer_account="Investments",
+                needs_review=False,
+            )
+
+        if "INDSTOCKS" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=pay_method,
+                category="Transfer, withdraw",
+                payee="IndMoney",
+                note="Indian Stocks in IndMoney: INDstocks wallet deposit",
+                transfer_account="Investments",
+                needs_review=False,
+            )
+
+        if narr_u.endswith("-50200021339924") or "IPO@" in narr_u or note_u.startswith("IPO"):
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.9,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=pay_method,
+                category="Transfer, withdraw",
+                payee="IndMoney",
+                note="IPO / REIT allotment in IndMoney",
+                transfer_account="Investments",
+                needs_review=False,
+            )
+
         # 2. Platform Merchants (Zomato, Zepto, Blinkit, Swiggy, Amazon, Rapido, Namma Yatri, Uber, Metro)
         if "ZOMATO" in narr_u or "ETERNAL LIMITED" in narr_u:
             custom_note = "" if note_u in GENERIC_UPI_NOTES else humanize_upi_note(upi.note)
@@ -545,6 +607,136 @@ class DeclarativeRuleCollector:
                 transfer_account="NiyoX",
                 needs_review=False,
             )
+        if "CCAFINTERSCALETECHNO" in narr_u or "INTERSCALE" in narr_u or "GULLAK" in narr_u:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="Gullak",
+                note="Gullak Gold purchase (via CCAF Interscale Technologies)",
+                transfer_account="Investments",
+                needs_review=False,
+            )
+        m_rfx = re.search(
+            r"RFX\s+([A-Z0-9]+BTT[A-Z0-9]+)\s+USD([\d.]+)@([\d.]+)",
+            narr,
+            re.IGNORECASE,
+        )
+        if m_rfx:
+            rfx_ref = m_rfx.group(1).upper()
+            usd_val = float(m_rfx.group(2))
+            rate_str = m_rfx.group(3)
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="IndMoney",
+                note=f"US Stocks in IndMoney: INR to USD (${usd_val:,.2f} at {rate_str} INR/USD, RFX {rfx_ref})",
+                transfer_account="Investments",
+                needs_review=False,
+            )
+        m_btt_gst = re.search(r"([0-9]{6}BTT[0-9]+)\s+DPO\d+\s+(CGST|SGST)", narr_u)
+        if m_btt_gst:
+            btt_ref = m_btt_gst.group(1)
+            tax_type = m_btt_gst.group(2)
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=TransactionKind.EXPENSE,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Charges, fees",
+                payee="HDFC",
+                note=f"{tax_type} on USD remittance (RFX {btt_ref})",
+                needs_review=False,
+            )
+        if "INDSTOCKS PVT LTD" in narr_u and row.is_credit:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="IndMoney",
+                note="INDstocks wallet quarterly settlement refund from IndMoney",
+                transfer_account="Investments",
+                needs_review=False,
+            )
+        if "CCASURYODAYBANK" in narr_u or ("SURY0BK" in narr_u and "CC AVENUE" in narr_u):
+            amt_inr = row.amount_minor // 100
+            suryoday_note = (
+                "Fixed Deposit in IndMoney: Suryoday Small Finance Bank payment refund via CCAvenue"
+                if row.is_credit
+                else f"Fixed Deposit in IndMoney: Suryoday Small Finance Bank (₹{amt_inr:,})"
+            )
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.98,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="Suryoday Bank",
+                note=suryoday_note,
+                transfer_account="Investments",
+                needs_review=False,
+            )
+        if "SHRIRAM FINANCE" in narr_u:
+            if row.is_credit and row.amount_minor < 20000000:
+                return EnrichmentEvidence(
+                    source_name=self.name,
+                    priority=EvidencePriority.DECLARATIVE_RULE,
+                    confidence=0.95,
+                    row_index=row.row_index,
+                    kind=TransactionKind.INCOME,
+                    payment_method=PaymentMethod.TRANSFER,
+                    category="Interests, dividends",
+                    payee="Shriram Finance",
+                    note="Shriram Finance FD Yearly Interest payout in IndMoney",
+                    needs_review=False,
+                )
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.TRANSFER,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Transfer, withdraw",
+                payee="Shriram Finance",
+                note=(
+                    "Fixed Deposit in IndMoney: Shriram Finance FD Maturity Principal Auto-Refund"
+                    if row.is_credit
+                    else "Fixed Deposit in IndMoney: Shriram Finance FD"
+                ),
+                transfer_account="Investments",
+                needs_review=False,
+            )
+        if "REIT" in narr_u and "DISTN" in narr_u and row.is_credit:
+            return EnrichmentEvidence(
+                source_name=self.name,
+                priority=EvidencePriority.DECLARATIVE_RULE,
+                confidence=0.95,
+                row_index=row.row_index,
+                kind=TransactionKind.INCOME,
+                payment_method=PaymentMethod.TRANSFER,
+                category="Interests, dividends",
+                payee="IndMoney",
+                note="REIT Distribution in IndMoney",
+                needs_review=False,
+            )
         if row.is_credit and (
             "TELE TRANSFER CREDIT" in narr_u or ("IMPS PMT" in narr_u and "REF#" in narr_u)
         ):
@@ -702,9 +894,7 @@ class DeclarativeRuleCollector:
             )
         if "FIRST YEAR MEMBERSHIP FEE" in base_narr_u or "RENEWAL MEMBERSHIP FEE" in base_narr_u:
             fee_label = (
-                "First year membership fee"
-                if "FIRST YEAR" in base_narr_u
-                else "Renewal membership fee"
+                "First year membership fee" if "FIRST YEAR" in base_narr_u else "Renewal membership fee"
             )
             if row.is_credit:
                 fee_label = f"{fee_label} reversal"
@@ -720,15 +910,8 @@ class DeclarativeRuleCollector:
                 note=fee_label,
                 needs_review=False,
             )
-        if (
-            "1% ON ALL DCC TRANSACTION" in base_narr_u
-            or "CONSOLIDATED FCY MARKUP FEE" in base_narr_u
-        ):
-            base_fee = (
-                "DCC markup fee"
-                if "1% ON ALL DCC" in base_narr_u
-                else "Foreign currency markup fee"
-            )
+        if "1% ON ALL DCC TRANSACTION" in base_narr_u or "CONSOLIDATED FCY MARKUP FEE" in base_narr_u:
+            base_fee = "DCC markup fee" if "1% ON ALL DCC" in base_narr_u else "Foreign currency markup fee"
             fee_note = f"{base_fee} ({parent_ctx})" if parent_ctx else base_fee
             return EnrichmentEvidence(
                 source_name=self.name,

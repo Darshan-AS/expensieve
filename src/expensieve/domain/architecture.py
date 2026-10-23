@@ -369,8 +369,8 @@ model {{
 
         extractor investmentExtractor 'InvestmentEmailExtractor' {{
           #extractorTag
-          description 'Extracts IPO allotments (KFintech/MUFG) and Shriram Finance FD interest/maturity principal transfers to Investments'
-          technology 'Shriram Finance • KFintech • MUFG'
+          description 'Extracts Gullak gold certificates, INDmoney (US Stocks .xls, Indian Stocks Contract Note .pdf, MFs), CDSL/KFintech/MUFG IPOs & REITs, and Shriram Finance FDs'
+          technology 'Gullak • INDmoney • CDSL • KFintech • MUFG • Shriram'
         }}
 
         extractor hdfcCcExtractor 'HdfcCreditCardExtractor' {{
@@ -699,13 +699,13 @@ flowchart LR
         SWG["SwiggyReceiptExtractor\\nfrom:noreply@swiggy.in"]
         AMZ["AmazonEmailExtractor\\nfrom:auto-confirm@amazon.in"]
         TRV["TravelBookingExtractor\\nConfirmTkt / IRCTC / MMT"]
-        INV["InvestmentEmailExtractor\\nShriram FD / KFintech / MUFG"]
+        INV["InvestmentEmailExtractor\\nGullak / INDmoney / CDSL / KFintech / MUFG / Shriram"]
         HCC["HdfcCreditCardExtractor\\nalerts@hdfcbank.net / Emailstatements.cards"]
     end
 
     IMAP ==> COL
     COL --> NY & RAP & SWG & AMZ & TRV & INV & HCC
-    NY & RAP & HCC --> PDF --> GAZ
+    NY & RAP & INV & HCC --> PDF --> GAZ
 ```
 
 | Extractor | Query Filter | Attachment / Body Format | Output Note Format & Category |
@@ -715,7 +715,7 @@ flowchart LR
 | `SwiggyReceiptExtractor` | `from:noreply@swiggy.in` | HTML / Plaintext table | `<Dish 1>, <Dish 2> (<Restaurant>)` (`Restaurant, fast-food`) |
 | `AmazonEmailExtractor` | `from:auto-confirm@amazon.in` | Shipment confirmation emails | `<Item 1>, <Item 2>` (`Pharmacy`, `Groceries`, `Electronics`, `Shopping`) |
 | `TravelBookingExtractor` | `ConfirmTkt / IRCTC / MakeMyTrip` | Booking confirmation emails | `Train to <Dest> (<Train>, <Class>, PNR <PNR>)` (`Holiday, trips, hotels`) |
-| `InvestmentEmailExtractor` | `Shriram / KFintech / MUFG` | FD & IPO allotment advices | Transfer to `Investments` (`<IPO Name> IPO allotment` / `FD interest`) |
+| `InvestmentEmailExtractor` | `Gullak / INDmoney / CDSL / KFintech / MUFG / Shriram` | Gold certs, US Stocks `.xls`, Contract Note `.pdf`, MF & IPO/REIT advices | Transfer to `Investments` (`Gullak Gold+`, `US Stocks`, `Indian Stocks`, `Mutual Fund`, `IPO/REIT`) & `Interests, dividends` |
 | `HdfcCreditCardExtractor` | `alerts@hdfcbank.net / Emailstatements.cards` | Encrypted RC4-128 CC PDF + InstaAlerts | Exact UTC timestamps + Transfer to `HDFC Credit Card` |
 """
 

@@ -255,6 +255,204 @@ class TestGmailReceiptExtractors(unittest.TestCase):
         self.assertEqual(i_evs[0].payee, "IndMoney")
         self.assertIn("26 shares @ ₹574, Appl 68857622", i_evs[0].note or "")
 
+    def test_gullak_indmoney_reit_and_cdsl_extractors(self) -> None:
+        import struct
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+
+        from expensieve.adapters.collectors.adb_sms import AdbSmsCollector
+
+        inv_ext = InvestmentEmailExtractor()
+        rows = [
+            _make_row(708, "2026-10-16", "114916133822/CCAFINTERSCALETECHNO", debit_minor=7540621),
+            _make_row(
+                141,
+                "2026-02-24",
+                "UPI-VALID UPI INDSTOCKS -INDSTOCKS.ICCL1.BRK@VALIDHDFC-119111390583-QUANT MF IN INDMON",
+                debit_minor=30000000,
+            ),
+            _make_row(
+                185,
+                "2026-03-23",
+                "UPI-INDSTOCKS-INDSTOCKS.BRK@VALIDICICI-120452900608-UPI",
+                debit_minor=18000000,
+            ),
+            _make_row(284, "2026-05-13", "UPI-613355541929-613355541929-50200021339924", debit_minor=1500000),
+            _make_row(558, "2026-08-19", "BAGMANE PRIME OFF REIT Q1 FY27 DISTN AC", credit_minor=22312),
+            _make_row(662, "2026-09-23", "UPI-626600792648-NSE152451283-50200021339924", debit_minor=5355000),
+            _make_row(362, "2026-06-04", "RFX 030626BTT01573 USD5193.79@96.5425", debit_minor=50142147),
+            _make_row(363, "2026-06-04", "030626BTT01573 DPO2715500957379 CGST", debit_minor=27064),
+            _make_row(91, "2026-02-08", "114286382589/CCASURYODAYBANK", debit_minor=100000000),
+            _make_row(
+                242,
+                "2026-04-18",
+                "FT- KXLEPG697M-BSE-57500001499229 - INDSTOCKS PVT LTD DSCNB A/C -",
+                credit_minor=75106,
+            ),
+        ]
+
+        # Build a minimal BIFF8 (.xls) payload with one US stock BUY row on 04 Jun 2026
+        def _biff_rec(rec_id: int, payload: bytes) -> bytes:
+            return struct.pack("<HH", rec_id, len(payload)) + payload
+
+        def _biff_label(r: int, c: int, text: str) -> bytes:
+            b = text.encode("latin1")
+            return _biff_rec(0x0204, struct.pack("<HHHH", r, c, 0, len(b)) + b)
+
+        def _biff_num(r: int, c: int, val: float) -> bytes:
+            return _biff_rec(0x0203, struct.pack("<HHHd", r, c, 0, val))
+
+        xls_bytes = (
+            _biff_rec(0x0809, struct.pack("<HHHHHHHH", 0x0600, 0x0005, 0, 0, 0, 0, 0, 0))
+            + _biff_rec(0x0809, struct.pack("<HHHHHHHH", 0x0600, 0x0010, 0, 0, 0, 0, 0, 0))
+            + _biff_label(0, 0, "Stock Name")
+            + _biff_label(0, 10, "Brokerage ($)")
+            + _biff_label(1, 0, "Broadcom Inc. Common Stock")
+            + _biff_label(1, 1, "AVGO")
+            + _biff_label(1, 2, "04 Jun 2026, 11:04 PM")
+            + _biff_label(1, 3, "04 Jun 2026, 11:04 PM")
+            + _biff_label(1, 4, "ref-1")
+            + _biff_label(1, 5, "BUY")
+            + _biff_label(1, 6, "market")
+            + _biff_num(1, 7, 1.0)
+            + _biff_num(1, 8, 422.8938)
+            + _biff_num(1, 9, 422.8938)
+            + _biff_num(1, 10, 1.25)
+        )
+
+        msgs = [
+            EmailMessagePayload(
+                uid="g1",
+                sent_utc=datetime(2026, 10, 16, 8, 46, 52, tzinfo=UTC),
+                date_iso="2026-10-16",
+                sender="Gullak <no-reply@gullak.money>",
+                subject="Investment Certificate",
+                text_body="We are happy to share that your investment of 5 grams of gold in *Gold+* done on 16/10/2026 was successful.",
+                attachments=(),
+            ),
+            EmailMessagePayload(
+                uid="mf1",
+                sent_utc=datetime(2026, 2, 26, 10, 0, tzinfo=UTC),
+                date_iso="2026-02-26",
+                sender="'Transactions INDmoney' <transactions@transactions.indmoney.com>",
+                subject="Order Successful: Units allotted for your mutual fund buy order of ₹2.99L ✅",
+                text_body=(
+                    "Fund: Quant ELSS Tax Saver Growth Option Direct Plan Folio Number 51011383342 "
+                    "Order ID 63131026 Buy Amount ₹2.99L Units alloted 717.028 Allotted NAV 418.3728 Order date 24 Feb 2026"
+                ),
+                attachments=(),
+            ),
+            EmailMessagePayload(
+                uid="ind1",
+                sent_utc=datetime(2026, 3, 23, 8, 20, tzinfo=UTC),
+                date_iso="2026-03-23",
+                sender="'INDmoney Indian Stocks' <transactions@transactions.indmoney.com>",
+                subject="Congrats! INDstocks account funded with ₹ 180000",
+                text_body="The deposit of ₹ 180000 in your INDstocks Wallet is successful. Date Mar 23, 2026 01:47PM",
+                attachments=(),
+            ),
+            EmailMessagePayload(
+                uid="cdsl1",
+                sent_utc=datetime(2026, 3, 24, 9, 0, tzinfo=UTC),
+                date_iso="2026-03-24",
+                sender="services@cdslindia.co.in",
+                subject="Transactions In Your Demat Account",
+                text_body="1 NIPPON LIFE INDIA AM LTD#NIPPON INDIA MF-NIPPON INDIA ETF NIFTY 50 BEES INF204KB14I2 700.000 Credit 24/03/2026 14:01:46",
+                attachments=(),
+            ),
+            EmailMessagePayload(
+                uid="reit_ipo",
+                sent_utc=datetime(2026, 5, 13, 12, 0, tzinfo=UTC),
+                date_iso="2026-05-13",
+                sender="KFIN TECHNOLOGIES LIMITED <bagmane.reit@kfintech.com>",
+                subject="BAGMANE PRIME OFFICE - REIT-2026",
+                text_body=(
+                    "Bid cum Application Form No. 68836494 Issue Price per Security (Rs.) 100 "
+                    "Units Applied For 1050 Units Allotted 150 Units being credited"
+                ),
+                attachments=(),
+            ),
+            EmailMessagePayload(
+                uid="reit_dist",
+                sent_utc=datetime(2026, 8, 20, 6, 46, tzinfo=UTC),
+                date_iso="2026-08-20",
+                sender="BAGMANE PRIME OFFICE REIT Distribution Advice <bagmaneprimeoffice.reit@kfintech.com>",
+                subject="BAGMANE PRIME OFFICE REIT || Distribution Advice for the quarter ended June 30, 2026",
+                text_body=(
+                    "1 Cashflow Distribution pertaining to Q1 FY27 "
+                    "9 Units held as on the Record Date 150 "
+                    "10 Date of Credit August 19, 2026 "
+                    "D TDS Amount ?1.88 Nil ?1.88 "
+                    "E Net Distribution (B-D) ?16.90 ?206.22 ?223.12"
+                ),
+                attachments=(),
+            ),
+            EmailMessagePayload(
+                uid="us1",
+                sent_utc=datetime(2026, 10, 20, 16, 17, tzinfo=UTC),
+                date_iso="2026-10-20",
+                sender="'Transactions INDmoney' <transactions@transactions.indmoney.com>",
+                subject="Your US Stocks - Trade Report is here!",
+                text_body="US Stocks Account Trade Report",
+                attachments=(("IND-ORDER_REPORT.xls", xls_bytes),),
+            ),
+        ]
+
+        evs = inv_ext.extract(msgs, rows)
+        by_row: dict[int, list[str]] = {}
+        for e in evs:
+            if e.row_index is not None and e.note:
+                by_row.setdefault(e.row_index, []).append(e.note)
+
+        self.assertIn("Gullak Gold+ purchase: 5g gold", by_row[708][0])
+        self.assertIn(
+            "Quant ELSS Tax Saver Growth Option Direct Plan (717.028 units @ ₹418.3728 NAV, Folio 51011383342)",
+            by_row[141][0],
+        )
+        self.assertTrue(any("700x Nippon India ETF Nifty 50 BeES" in n for n in by_row[185]))
+        self.assertIn(
+            "REIT IPO in IndMoney: Bagmane Prime Office REIT (150 units @ ₹100, Appl 68836494)",
+            by_row[284][0],
+        )
+        self.assertIn(
+            "REIT Distribution in IndMoney: Bagmane Prime Office REIT Q1 FY27 (150 units: ₹206.22 dividend + ₹16.90 net interest after ₹1.88 TDS)",
+            by_row[558][0],
+        )
+        self.assertIn(
+            "- Broadcom Inc. (AVGO): 1 qty @ $422.8938 = $422.89 + $1.25 fee (04 Jun 2026)", by_row[362][0]
+        )
+
+        # Verify ADB SMS CDSL IPO credit matching for Row 662 (NSE IPO)
+        raw_sms = (
+            "Row: 1 date=1790166972968, address=BP-CDSLTX-S, "
+            "body=CDSL: Credit in a/c *17594822 through IPO/FPO for 30-NATIONAL STOCK EX-EQ on 23SEP\n"
+            "Row: 2 date=1789883784890, address=AD-BSELTD-S, "
+            "body=DEAR INVESTOR,APPLICATION NO.152451283 OF NSE. HAS BEEN SUBMITTED ON BSE.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sms_path = Path(tmpdir) / "sms.txt"
+            sms_path.write_text(raw_sms, encoding="utf-8")
+            sms_evs = AdbSmsCollector(cached_sms_path=sms_path).collect(
+                rows, date(2026, 1, 1), date(2026, 10, 21)
+            )
+            nse_evs = [e for e in sms_evs if e.row_index == 662 and e.note]
+            self.assertEqual(len(nse_evs), 1)
+            self.assertEqual(
+                nse_evs[0].note, "IPO in IndMoney: National Stock Ex (30 shares @ ₹1,785, Appl 152451283)"
+            )
+
+        # Verify DeclarativeRuleCollector baseline rules for investment rows
+        rule_evs = {
+            e.row_index: e
+            for e in DeclarativeRuleCollector().collect(rows, date(2026, 1, 1), date(2026, 10, 21))
+        }
+        self.assertEqual(rule_evs[708].payee, "Gullak")
+        self.assertEqual(rule_evs[362].payee, "IndMoney")
+        self.assertEqual(rule_evs[363].category, "Charges, fees")
+        self.assertEqual(rule_evs[91].payee, "Suryoday Bank")
+        self.assertEqual(rule_evs[242].payee, "IndMoney")
+
 
 class TestMerchantOrderCollectors(unittest.TestCase):
     def test_zomato_dish_formatting_and_matching(self) -> None:

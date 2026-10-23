@@ -12,6 +12,7 @@ from expensieve.domain.models import (
     EnrichmentEvidence,
     EvidencePriority,
     StatementRow,
+    TransactionKind,
 )
 
 
@@ -127,9 +128,30 @@ class AdbSmsCollector:
 
         alerts = parse_raw_sms_dump(raw_text)
         by_rrn: dict[str, ParsedSmsAlert] = {}
+        bse_appl_by_symbol: dict[str, str] = {}
+        cdsl_ipo_credits: list[tuple[str, int, str, str]] = []  # (date_iso, qty, company, timestamp_iso)
+
         for a in alerts:
             if a.rrn_12 and a.rrn_12 not in by_rrn:
                 by_rrn[a.rrn_12] = a
+            m_bse = re.search(
+                r"APPLICATION\s+NO\.?\s*(\d+)\s+OF\s+([A-Za-z0-9.\-]+?)\.?\s+HAS\s+BEEN\s+SUBMITTED\s+ON\s+BSE",
+                a.body,
+                re.IGNORECASE,
+            )
+            if m_bse:
+                bse_appl_by_symbol[m_bse.group(2).upper().strip(".")] = m_bse.group(1).strip()
+
+            m_cdsl = re.search(
+                r"CDSL:\s*Credit\s+in\s+a/c\s+\*\d+\s+through\s+IPO/FPO\s+for\s+(\d+(?:\.\d+)?)-([A-Za-z0-9 \-\.]+?)(?:-EQ)?\s+on\s+\d{2}[A-Za-z]{3}",
+                a.body,
+                re.IGNORECASE,
+            )
+            if m_cdsl:
+                qty_val = int(float(m_cdsl.group(1)))
+                comp_raw = m_cdsl.group(2).strip().title()
+                if qty_val > 0:
+                    cdsl_ipo_credits.append((a.date_iso, qty_val, comp_raw, a.timestamp_iso))
 
         evidences: list[EnrichmentEvidence] = []
         for row in rows:
@@ -154,4 +176,41 @@ class AdbSmsCollector:
                         timestamp_iso=matched.timestamp_iso,
                     )
                 )
+
+            # Check if an ASBA IPO debit row matches a CDSL IPO/FPO credit SMS
+            if not row.is_credit and (
+                row.narration.endswith("-50200021339924") or "IPO" in row.narration.upper()
+            ):
+                for c_date_iso, qty_val, comp_name, c_ts_iso in cdsl_ipo_credits:
+                    if c_date_iso == row.date_iso and (row.amount_minor % (qty_val * 100) == 0):
+                        price_inr = (row.amount_minor // 100) // qty_val
+                        m_nar_appl = re.search(
+                            r"UPI-\d+-([A-Z]*)(\d{7,12})-50200021339924",
+                            row.narration.upper(),
+                        )
+                        appl_no = ""
+                        if m_nar_appl:
+                            appl_no = m_nar_appl.group(2)
+                        else:
+                            for sym, b_appl in bse_appl_by_symbol.items():
+                                if sym in comp_name.upper():
+                                    appl_no = b_appl
+                                    break
+                        appl_part = f", Appl {appl_no}" if appl_no else ""
+                        evidences.append(
+                            EnrichmentEvidence(
+                                source_name=f"{self.name}:cdsl_ipo",
+                                priority=EvidencePriority.UPI_REMARK,
+                                confidence=0.96,
+                                row_index=row.row_index,
+                                timestamp_iso=c_ts_iso if matched is None else None,
+                                kind=TransactionKind.TRANSFER,
+                                transfer_account="Investments",
+                                category="Transfer, withdraw",
+                                payee="IndMoney",
+                                note=f"IPO in IndMoney: {comp_name} ({qty_val} shares @ ₹{price_inr:,}{appl_part})",
+                                needs_review=False,
+                            )
+                        )
+                        break
         return evidences
